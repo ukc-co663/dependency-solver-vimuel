@@ -1,0 +1,75 @@
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
+
+module Parser
+  ( decode
+  , module Parser
+  )
+ where
+
+import Data.Aeson
+import Data.Char (isAlphaNum, isDigit)
+import Data.Text (Text)
+import qualified Data.Text as T
+import Data.Text.Read (decimal)
+
+import Data.ByteString.Lazy (readFile)
+
+import Prelude hiding (readFile)
+
+data Rel =  Lt | LtEq | Eq | GtEq | Gt deriving Show
+
+type Version = [Word]
+
+data Ref = Ref
+  { rName :: Text
+  , versionContsraint :: Maybe (Rel, Version)
+  } deriving Show
+
+data Package = Package
+  { pName :: Text
+  , pVersion :: Version
+  , size :: Word
+  , depends :: [[Ref]]
+  , conflicts :: [Ref]
+  } deriving (Show)
+
+type Repo = [Package]
+
+type State = [Ref]
+
+data Action = Add | Remove
+
+type Constraint = (Action, Ref)
+
+type Solution = [Constraint]
+
+instance FromJSON Package where
+  parseJSON = withObject "Package" $ \obj -> do
+    pName <- obj .: "name"
+    ver <- obj .: "version"
+    let pVersion = toVersion ver
+    size <- obj .: "size"
+    dep <- obj .:? "depends" .!= []
+    let depends = map (map toRef) dep
+    con <- obj .:? "conflicts" .!= []
+    let conflicts = map toRef con
+    return Package {..}
+
+toVersion :: Text -> Version
+toVersion str = map unwrap $ T.splitOn "." str
+unwrap x = case decimal x of Right (n,_) -> n
+
+toRef :: Text -> Ref
+toRef inp = case T.break (\c -> c == '<' || c == '=' || c == '>') inp of
+  (name,"") -> Ref name  Nothing
+  (name,rest) -> case T.break isDigit rest of
+    (rel,vers) -> Ref name $ Just (toRel rel, toVersion vers)
+
+toRel :: Text -> Rel
+toRel inp = case inp of
+  "<" -> Lt
+  "<=" -> LtEq
+  "=" -> Eq
+  ">=" -> GtEq
+  ">" -> Gt
