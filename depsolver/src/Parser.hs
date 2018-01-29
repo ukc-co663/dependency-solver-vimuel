@@ -22,6 +22,7 @@ import qualified Data.Map.Lazy as MapL
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Read (decimal)
+import qualified Data.Set as Set
 import Data.Vector (Vector)
 import qualified Data.Vector as V
 import System.FilePath ((</>))
@@ -40,6 +41,9 @@ instance ToText Command where
 type State = [Reference]
 
 type Name = Text
+
+type RefString = Text
+
 data Reference = Ref Name (Maybe (Relation, Version)) deriving Show
 
 instance ToText Reference where
@@ -80,9 +84,12 @@ data PkgMeta = Meta
   , inConstraint :: Bool
   } deriving Show
 
-mkRef :: Name -> PkgMeta -> String
-mkRef name meta = T.unpack $ name <> "=" <> vers
+mkRefT :: Name -> PkgMeta -> RefString
+mkRefT name meta = name <> "=" <> vers
   where vers = toText $ version meta
+
+mkRef :: Name -> PkgMeta -> String
+mkRef name meta = T.unpack $ mkRefT name meta
 
 type Repo = MapL.Map Name [PkgMeta]
 
@@ -128,11 +135,12 @@ constraints wd = do
   let Just cs = decode raw :: Maybe [Text]
   return $ map toCommand cs
 
-initial :: FilePath -> IO [Reference]
+initial :: FilePath -> IO (Set.Set RefString)
 initial wd = do
   raw <- B.readFile $ wd </> "initial.json"
   let Just cs = decode raw :: Maybe [Text]
-  return $ map toRef cs
+  -- return $ Set.fromList $ map toRef cs
+  return $ Set.fromList cs
 
 -- checkIfInRepo inits repo =
 --   forM_ inits (\ref -> case get repo ref of Nothing -> print $ toString ref; _ -> return ())
