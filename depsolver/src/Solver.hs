@@ -1,13 +1,17 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ImplicitParams #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 -- {-# LANGUAGE Strict #-}
 module Solver where
 
 import Control.Monad.IO.Class
 import Data.Traversable (for, forM)
 
+import Data.Foldable (foldl')
+
 import qualified Data.Set as Set
 
+import Data.Map.Lazy ((!))
 import qualified Data.Map.Lazy as MapL
 
 import Data.SBV
@@ -101,7 +105,7 @@ mkConstraints repo installed memoised alreadyUsed variables (Do action pkgRef) =
 
                     -- add constraint saying that at least one must be satisfied
                     depDisj <- for disjs (mkConstraints repo installed memoised (Set.insert (name, version p) alreadyUsed) variables . Do Add)
-                    return $ bOr depDisj
+                    return $ bXor depDisj
 
                   -- go over all conflicts and require them to be removed (TODO: is this right way?)
                   conflicts <- for (conflicts p) (mkConstraints repo installed memoised alreadyUsed variables . Do Remove) -- add to already used?
@@ -142,17 +146,162 @@ mkConstraints repo installed memoised alreadyUsed variables (Do action pkgRef) =
 --       , b' ==> bnot b
 --       , c ==> bnot (bOr [b, b'])
 --       , d ==> bnot b' ]
+bXor :: Boolean b => [b] -> b
+bXor = foldl' (<+>) false
 
-test = sat $ do
+test = optimize Lexicographic $ do
   a <- sBool "A=2.01"
   b <- sBool "B=3.0"
   b' <- sBool "B=3.2"
   c <- sBool "C=1"
   d <- sBool "D=10.3.1"
-  solve
-      [ a
-      , bOr [b', c]
-      , d
-      , b' ==> bnot b
-      , c ==> bnot (bOr [b, b'])
-      , d ==> bnot b' ]
+  assertSoft "B=3.0 is preinstalled" b (Penalty 1000000 Nothing)
+  namedConstraint "install A=2.01" a
+  namedConstraint "dependencies of A=2.01" (bOr [b', c])
+  namedConstraint "dependency of A" d
+  namedConstraint "conflict between b and b'" (b' ==> bnot b)
+  namedConstraint "conflict between c and b" (c ==> bnot (bOr [b, b']))
+  namedConstraint "conflict between d and b'" (d ==> bnot b')
+
+test' = optimize Lexicographic $ do
+  a <- sBool "A=2.01"
+  b <- sBool "B=3.0"
+  b' <- sBool "B=3.2"
+  c <- sBool "C=1"
+  d <- sBool "D=10.3.1"
+  assertSoft "B=3.0 is preinstalled" b (Penalty 1000000 Nothing)
+  namedConstraint "install A=2.01" a
+  namedConstraint "dependencies of A=2.01" (bOr [b', c])
+  namedConstraint "dependency of A" d
+  namedConstraint "conflict between b and b'" (b' ==> bnot b)
+  namedConstraint "conflict between c and b" (c ==> bnot (bOr [b, b']))
+  namedConstraint "conflict between d and b'" (d ==> bnot b')
+  let b2n b = ite b 1 0
+      cost :: SInteger
+      cost = sum $ map b2n [a, b, b', c, d]
+  minimize "cost" cost
+
+test'' = optimize Lexicographic $ do
+  a <- sBool "A=2.01"
+  b <- sBool "B=3.0"
+  b' <- sBool "B=3.2"
+  c <- sBool "C=1"
+  d <- sBool "D=10.3.1"
+  assertSoft "B=3.2 is preinstalled" b' (Penalty 1000000 Nothing)
+  namedConstraint "install A=2.01" a
+  namedConstraint "dependencies of A=2.01" (bOr [b', c])
+  namedConstraint "dependency of A" d
+  namedConstraint "conflict between b and b'" (b' ==> bnot b)
+  namedConstraint "conflict between c and b" (c ==> bnot (bOr [b, b']))
+  -- namedConstraint "conflict between d nd b'" (d ==> bnot b')
+  let b2n b = ite b 1 0
+      cost :: SInteger
+      cost = sum $ map b2n [a, b, b', c, d]
+  minimize "cost" cost
+
+test''' = optimize Lexicographic $ do
+  a <- sBool "A=2.01"
+  b <- sBool "B=3.0"
+  b' <- sBool "B=3.2"
+  c <- sBool "C=1"
+  d <- sBool "D=10.3.1"
+
+  namedConstraint "install A=2.01" a
+  namedConstraint "dependencies of A=2.01" (bOr [b, b', c])
+  namedConstraint "dependency of A" d
+  namedConstraint "conflict between b and b'" (b' ==> bnot b)
+  namedConstraint "conflict between c and b" (c ==> bnot (bOr [b, b']))
+  -- namedConstraint "conflict between d nd b'" (d ==> bnot b')
+  let cost :: SInteger
+      cost = sum $ map (\(v,c,c') -> ite v c c')
+                [(a, 1672, 0), (b, 83619, 0), (b', 0, 1000000), (c, 23, 0), (d, 88847, 0)]
+  minimize "cost" cost
+
+test'''' = optimize Lexicographic $ do
+  a <- sBool "A=2.01"
+  b <- sBool "B=3.0"
+  b' <- sBool "B=3.2"
+  c <- sBool "C=1"
+  d <- sBool "D=10.3.1"
+
+  namedConstraint "install A=2.01" a
+  namedConstraint "dependencies of A=2.01" (bOr [b, b', c])
+  namedConstraint "dependency of A" d
+  namedConstraint "conflict between b and b'" (b' ==> bnot b)
+  namedConstraint "conflict between c and b" (c ==> bnot (bOr [b, b']))
+  -- namedConstraint "conflict between d nd b'" (d ==> bnot b')
+  let cost :: SInteger
+      cost = sum $ map (\(v,c,c') -> ite v c c')
+                [(a, 1672, 0), (b, 83619, 0), (b', 211234, 0), (c, 23, 0), (d, 88847, 0)]
+  minimize "cost" cost
+
+dict :: Symbolic (MapL.Map String SInteger)
+dict = do
+  vs <- mapM mkVar ["A=2.01", "B=3.2", "B=3.0", "C=1", "D=10.3.1"]
+  return $ MapL.fromList vs
+  where
+    mkVar name = do
+        v <- sInteger name
+        return (name, v)
+
+test5 = sat $ do
+  vs <- dict
+  let a = vs ! "A=2.01"
+      b = vs ! "B=3.0"
+      b' = vs ! "B=3.2"
+      c = vs ! "C=1"
+      d = vs ! "D=10.3.1"
+
+  namedConstraint "install A=2.01" (a .> 0)
+  namedConstraint "dependencies of A=2.01" $ dep a [[b, c],[d]]
+  namedConstraint "conflict between c and b" $ confl c [b, b']
+
+
+dict' :: Symbolic (MapL.Map String (SInteger, (SInteger,SInteger)))
+dict' = do
+  vs <- mapM mkVar [("A=2.01",(1672,0)),("B=3.2",(83619,0)),("B=3.0",(211234,0)),("C=1",(23,0)),("D=10.3.1",(88847,0))]
+  return $ MapL.fromList vs
+  where
+    mkVar (name,size) = do
+        v <- sInteger name
+        return (name, (v, size))
+
+test6 = optimize Lexicographic $ do
+  vs <- dict'
+  let a = fst $ vs ! "A=2.01"
+      b = fst $ vs ! "B=3.0"
+      b' = fst $ vs ! "B=3.2"
+      c = fst $ vs ! "C=1"
+      d = fst $ vs ! "D=10.3.1"
+
+  namedConstraint "install A=2.01" (a .> 0)
+  namedConstraint "dependencies of A=2.01" $ dep a [[b, c],[d]]
+  namedConstraint "conflict between c and b" $ confl c [b, b']
+
+  let cost :: SInteger
+      cost = sum . map (\(v,(c,c')) -> ite (v .> 0) c c') . map snd . MapL.toList $ vs
+  minimize "cost" cost
+
+dep p dss = bAnd $ map (\ds -> bOr $ map (p .<) ds) dss
+
+confl p cs = (p .> 0) ==> (bAnd $ map (.< 0) cs)
+
+
+
+-- test5 = optimize Lexicographic $ do
+--   namedConstraint "install A=2.01" a
+--   namedConstraint "dependencies of A=2.01" (bOr [b, b', c])
+--   namedConstraint "dependency of A" d
+--   namedConstraint "conflict between c and b" (c ==> bnot (bOr [b, b']))
+--   -- namedConstraint "conflict between d nd b'" (d ==> bnot b')
+--   let cost :: SInteger
+--       cost = sum $ map (\(v,c,c') -> ite v c c')
+--                 [(a, 1672, 0), (b, 83619, 0), (b', 211234, 0), (c, 23, 0), (d, 88847, 0)]
+--   minimize "cost" cost
+--   where
+--     b' = sBool "B=3.2"
+--     b = do
+--         b <- sBool "B=3.0"
+--         b' <- b'
+--         namedConstraint "conflict between b and b'" (b' ==> bnot b)
+--         return b
