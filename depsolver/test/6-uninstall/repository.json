@@ -2,8 +2,8 @@
   , "version" : "2.01"
   , "size" : 1672
   , "depends" :
-    [ [ "C=1" ]
-    ] }
+    [ [ "B>=3.1", "C=1" ]
+    , [ "D" ]] }
 , { "name" : "B"
   , "version" : "3.0"
   , "size" : 83619 }
@@ -15,10 +15,10 @@
   , "version" : "1"
   , "size" : 23
   , "conflicts" : [ "B" ]
-  , "depends" : [["D"]] }
+  , "depends" : [ ["D"] ] }
 , { "name" : "D"
   , "version" : "10.3.1"
   , "size" : 88847
-  , "depends" : [["C"]]
-  , "conflicts" : [ "B>=3.1" ] }
+  , "depends" : []
+  , "conflicts" : [ "B" ] }
 ]

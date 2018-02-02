@@ -113,14 +113,14 @@ install name meta@(PkgMeta refString version size depends conflicts installed) =
                 costF = if installed then 1000000 else 0
                 cost = ite (thisOrdering .> 0) costT costF
             liftIO $ modifyIORef ?cost (+ cost)
-            -- unless ((name,version) `Set.member` ?reached) $ do -- avoid going in cycles TODO
-            dependencies <- mapM (concatMapM installSome) depends
-            conflicts <- concatMapM installSome conflicts
-            namedConstraint ("Dependencies for " ++ unpack refString)
-                            $ thisOrdering .> 0 ==>
-                                bAnd (map (bOr . map (thisOrdering .<)) dependencies)
-            namedConstraint ("Conflicts for " ++ unpack refString)
-                            $ thisOrdering .> 0 ==> bAnd (map (.< 0) conflicts)
+            unless ((name,version) `Set.member` ?reached) $ do -- avoid going in cycles TODO
+              dependencies <- mapM (concatMapM installSome) depends
+              conflicts <- concatMapM installSome conflicts
+              namedConstraint ("Dependencies for " ++ unpack refString)
+                              $ thisOrdering .> 0 ==>
+                                  bAnd (map (bOr . map (thisOrdering .<)) dependencies)
+              namedConstraint ("Conflicts for " ++ unpack refString)
+                              $ thisOrdering .> 0 ==> bAnd (map (.== 0) conflicts)
 
 
 
