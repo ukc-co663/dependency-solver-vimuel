@@ -181,7 +181,7 @@ construct instructions such that every intermediate state is valid
 -- initial = []
 --
 -- constraints :: [Constraint]
--- constraints = [(Add, Ref "A" Nothing)]
+-- constraints = [(Add, PkgConstr "A" Nothing)]
 --
 -- repository :: Repo
 -- repository = case decode repo of Just r -> r

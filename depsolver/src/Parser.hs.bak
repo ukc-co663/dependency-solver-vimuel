@@ -21,7 +21,7 @@ data Rel =  Lt | LtEq | Eq | GtEq | Gt deriving Show
 
 type Version = [Word]
 
-data Ref = Ref
+data PkgConstr = PkgConstr
   { rName :: Text
   , versionContsraint :: Maybe (Rel, Version)
   } deriving Show
@@ -30,17 +30,17 @@ data Package = Package
   { pName :: Text
   , pVersion :: Version
   , size :: Word
-  , depends :: [[Ref]]
-  , conflicts :: [Ref]
+  , depends :: [[PkgConstr]]
+  , conflicts :: [PkgConstr]
   } deriving (Show)
 
 type Repo = [Package]
 
-type State = [Ref]
+type State = [PkgConstr]
 
 data Action = Add | Remove
 
-type Constraint = (Action, Ref)
+type Constraint = (Action, PkgConstr)
 
 type Solution = [Constraint]
 
@@ -60,11 +60,11 @@ toVersion :: Text -> Version
 toVersion str = map unwrap $ T.splitOn "." str
 unwrap x = case decimal x of Right (n,_) -> n
 
-toRef :: Text -> Ref
+toRef :: Text -> PkgConstr
 toRef inp = case T.break (\c -> c == '<' || c == '=' || c == '>') inp of
-  (name,"") -> Ref name  Nothing
+  (name,"") -> PkgConstr name  Nothing
   (name,rest) -> case T.break isDigit rest of
-    (rel,vers) -> Ref name $ Just (toRel rel, toVersion vers)
+    (rel,vers) -> PkgConstr name $ Just (toRel rel, toVersion vers)
 
 toRel :: Text -> Rel
 toRel inp = case inp of

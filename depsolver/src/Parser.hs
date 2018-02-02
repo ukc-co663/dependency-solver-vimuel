@@ -7,10 +7,12 @@
 module Parser
   ( decode
   , module Parser
+  , T.unpack
   )
  where
 
 import Control.Monad (forM_)
+import Control.Monad.IO.Class (liftIO)
 
 import Data.Aeson
 import Data.List (sortBy)
@@ -18,42 +20,46 @@ import Data.Ord (comparing)
 import Data.Maybe (fromJust)
 import Data.Char (isAlphaNum, isDigit)
 import Data.Monoid ((<>))
-import qualified Data.Map.Lazy as MapL
+import Data.Map (Map)
+import qualified Data.Map.Lazy as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Read (decimal)
+import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Vector (Vector)
 import qualified Data.Vector as V
 import System.FilePath ((</>))
+import Data.SBV
 
 import qualified Data.ByteString.Lazy as B
 import Data.Foldable (foldl')
 
 import Debug.Trace
 
-type Constraint = [(Action,Reference)]
+class ToText a where
+  toText :: a -> Text
+  toString :: a -> String
+  toString = T.unpack . toText
 
-data Command = Do Action Reference deriving Show
-instance ToText Command where
-  toText (Do a r) = toText a <> toText r
+data Polarity = Plus | Minus deriving Show
 
-type State = [Reference]
+instance ToText (Polarity, PkgConstr) where
+  toText (Plus, r) = "+" <> toText r
+  toText (Minus, r) = "-" <> toText r
 
 type Name = Text
 
 type RefString = Text
 
-data Reference = Ref Name (Maybe (Relation, Version)) deriving Show
+data PkgConstr = PkgConstr Name (Maybe (Relation, Version)) deriving Show
 
-instance ToText Reference where
-  toText (Ref name (Just (rel, vers))) = name <> toText rel <> toText vers
-  toText (Ref name _) = name
-
-toString :: ToText a => a -> String
-toString = T.unpack . toText
+instance ToText PkgConstr where
+  toText (PkgConstr name (Just (rel, vers))) = name <> toText rel <> toText vers
+  toText (PkgConstr name _) = name
 
 data Relation =  Lt | LtEq | Eq | GtEq | Gt deriving Show
+
 instance ToText Relation where
   toText r = case r of
     Lt -> "<"
@@ -71,122 +77,104 @@ toOperator r = case r of
   Gt -> (>)
 
 type Version = [Word]
+
 instance ToText Version where
   toText = T.intercalate "." . map (T.pack . show)
 
-type Size = Word
+-- data Pkg = Pkg
+--   { name :: Name
+--   , meta :: PkgMeta
+--   , ordering :: SInteger
+--   , cost :: SInteger
+--   } deriving Show
 
-data PkgMeta = Meta
-  { version :: Version
-  , size :: Size
-  , depends :: [[Reference]]
-  , conflicts :: [Reference]
-  , inConstraint :: Bool
+data PkgMeta = PkgMeta
+  { refString :: Text
+  , version :: Version
+  , size :: Integer
+  , depends :: [[(Polarity,PkgConstr)]]
+  , conflicts :: [(Polarity,PkgConstr)]
+  , installed :: Bool
   } deriving Show
 
-mkRefT :: Name -> PkgMeta -> RefString
-mkRefT name meta = name <> "=" <> vers
-  where vers = toText $ version meta
-
-mkRef :: Name -> PkgMeta -> String
-mkRef name meta = T.unpack $ mkRefT name meta
-
-type Repo = MapL.Map Name [PkgMeta]
-
-data Action = Add | Remove deriving Show
-instance ToText Action where
-  toText Add = "+"
-  toText Remove = "-"
-
-class ToText a where
-  toText :: a -> Text
-
-type PkgState = [Reference]
-
-type Target = [Command]
-
--- test = do
---   repository <- repository
---   let ?repo = repository in
---     print $ get $ Ref "B" $ Just (Eq, [3,2])
-
-get :: Repo -> Reference -> Maybe (Name, [PkgMeta])
-get repo (Ref name vers) =
-  case MapL.lookup name repo of -- TODO use monad instance of maybe
-    Nothing -> Nothing
-    Just pkgs ->
-      case vers of
-        Nothing ->
-          Just (name, pkgs)
-        (Just (rel, vers)) ->
-          Just (name, filter (\Meta{version = v} -> toOperator rel v vers) pkgs)
-
-
-
-
-repository :: FilePath -> IO Repo
-repository wd =  do
+repository :: FilePath -> IO (Map Name [PkgMeta])
+repository wd = do
   raw <- B.readFile $ wd </> "repository.json"
-  return $ parseRepo raw
+  initial <- initial wd
+  return $ parseRepo raw initial
 
-constraints :: FilePath -> IO Target
+constraints :: FilePath -> IO [(Polarity,PkgConstr)]
 constraints wd = do
   raw <- B.readFile $ wd </> "constraints.json"
   let Just cs = decode raw :: Maybe [Text]
-  return $ map toCommand cs
+  return $ map fromText cs
 
-initial :: FilePath -> IO (Set.Set RefString)
+initial :: FilePath -> IO (Set Text)
 initial wd = do
   raw <- B.readFile $ wd </> "initial.json"
   let Just cs = decode raw :: Maybe [Text]
   -- return $ Set.fromList $ map toRef cs
   return $ Set.fromList cs
 
--- checkIfInRepo inits repo =
---   forM_ inits (\ref -> case get repo ref of Nothing -> print $ toString ref; _ -> return ())
-
--- example: given a repo, return its total size
-allSizes :: Repo -> Size
-allSizes = foldl' (\n Meta{size = s} -> n + s) 0 . concatMap snd . MapL.toList
-
-
 instance {-# overlaps #-} FromJSON (Name, PkgMeta) where
   parseJSON = withObject "Package" $ \obj -> do
     name <- obj .: "name"
-    version <- fmap toVersion $ obj .: "version"
+    version <- fmap fromText $ obj .: "version"
+    let refString = toText $ PkgConstr name (Just (Eq, version))
     size <- obj .: "size"
     dep <- obj .:? "depends" .!= []
-    let depends = map (map toRef) dep
-    -- if (any ("freepats" `T.isPrefixOf`) . concat) dep then traceM (show (name, version, depends)) else return ()
+    -- let depends = map (map (\constr -> (Plus,fromText constr))) dep :: [[(Polarity,PkgConstr)]]
+    let depends = map (map ((,) Plus . fromText)) dep :: [[(Polarity,PkgConstr)]]
     con <- obj .:? "conflicts" .!= []
-    let conflicts = map toRef con
-    return (name, Meta version size depends conflicts False)
+    let conflicts = map ((,) Minus . fromText) con
+    return (name, PkgMeta refString version size depends conflicts False)
+
+parseRepo :: B.ByteString -> Set Text -> Map Name [PkgMeta]
+parseRepo raw initial =
+    let inp = V.toList $ fromJust $ decode raw :: [(Name, PkgMeta)] in
+    let pkgs = map (\(n,m) -> (n,[m{installed = refString m `Set.member` initial}])) inp in
+    fmap (sortBy $ comparing version) $ Map.fromListWith (++) pkgs
 
 
-parseRepo :: B.ByteString -> Repo
-parseRepo raw = fmap (sortBy (comparing version)) $ MapL.fromListWith (++) [(k,[v]) | (k,v) <- inp]
-  where inp = V.toList $ fromJust $ decode raw
+-- parseRepo :: B.ByteString -> Set Text -> Symbolic (Map Name [Pkg])
+-- parseRepo raw initial = do
+--     let inp = V.toList $ fromJust $ decode raw :: [(Name, PkgMeta)]
+--     pkgs <- mapM toPkg inp
+--     return $ fmap (sortBy $ comparing (version . meta)) $ Map.fromListWith (++) pkgs
+--   where
+--     toPkg :: (Name, PkgMeta) -> Symbolic (Name, [Pkg])
+--     toPkg (name, meta) = do
+--         ordering <- sInteger (T.unpack $ refString meta)
+--         let installed = refString meta `Set.member` initial
+--             costT = if installed then       0 else fromInteger $ size meta
+--             costF = if installed then 1000000 else 0
+--             cost = ite (ordering .> 0) costT costF
+--         return $ (name, [Pkg name meta ordering installed cost])
 
-toVersion :: Text -> Version
-toVersion "" = []
-toVersion str = map unwrap $ T.splitOn "." str
-unwrap x = case decimal x of Right (n,_) -> n
+class FromText a where
+  fromText :: Text -> a
+  fromString :: String -> a
+  fromString a = fromText (T.pack a)
 
-toRef :: Text -> Reference
-toRef inp = case T.span (\c -> isAlphaNum c || (c == '-') || (c == '.') || (c == '+')) inp of
-  (name,"") -> Ref name Nothing
-  (name,rest) -> case T.break (\c -> isDigit c || (c == '.')) rest of
-    (rel,vers) -> Ref name (Just (toRel rel, toVersion vers))
+instance FromText Version where
+  fromText "" = []
+  fromText str = map unwrap $ T.splitOn "." str where unwrap x = case decimal x of Right (n,_) -> n
 
-toRel :: Text -> Relation
-toRel inp = case inp of
-  "<" -> Lt
-  "<=" -> LtEq
-  "=" -> Eq
-  ">=" -> GtEq
-  ">" -> Gt
+instance FromText PkgConstr where
+  fromText inp = case T.span (\c -> isAlphaNum c || (c == '-') || (c == '.') || (c == '+')) inp of
+    (name,"") -> PkgConstr name Nothing
+    (name,rest) -> case T.break (\c -> isDigit c || (c == '.')) rest of
+      (rel,vers) -> PkgConstr name (Just (fromText rel, fromText vers))
 
-toCommand :: Text -> Command
-toCommand inp = case T.uncons inp of
-  Just ('+', rest) -> Do Add (toRef rest)
-  Just ('-', rest) -> Do Remove (toRef rest)
+instance FromText Relation where
+  fromText inp = case inp of
+    "<" -> Lt
+    "<=" -> LtEq
+    "=" -> Eq
+    ">=" -> GtEq
+    ">" -> Gt
+
+instance FromText (Polarity,PkgConstr) where
+  fromText inp = case T.uncons inp of
+    Just ('+', rest) -> (Plus,(fromText rest))
+    Just ('-', rest) -> (Minus,(fromText rest))
