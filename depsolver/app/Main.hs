@@ -9,4 +9,4 @@ import Solver
 main :: IO ()
 main = do
   (path:_) <- getArgs
-  print =<< go path
+  go path

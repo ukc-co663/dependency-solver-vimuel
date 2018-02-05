@@ -1,9 +1,9 @@
 [ { "name"  : "A"
-  , "version" : "2.01"
+  , "version" : "2.1"
   , "size" : 1672
   , "depends" :
     [ [ "B>=3.1", "C=1" ]
-    , [ "D" ]] }
+    , [ "D" ] ] }
 , { "name" : "B"
   , "version" : "3.0"
   , "size" : 83619 }
@@ -15,10 +15,10 @@
   , "version" : "1"
   , "size" : 23
   , "conflicts" : [ "B" ]
-  , "depends" : [ ["D"] ] }
+  , "depends" : [["D"]] }
 , { "name" : "D"
   , "version" : "10.3.1"
   , "size" : 88847
-  , "depends" : []
-  , "conflicts" : [ "B" ] }
+  , "depends" : [["C"]]
+  , "conflicts" : [ "B>=3.1" ] }
 ]

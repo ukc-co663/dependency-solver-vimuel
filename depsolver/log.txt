@@ -1,0 +1,28 @@
+"(declare-const |A=2.1| Int)" ; 1
+"(declare-const |B=3.0| Int)" ; 2
+"(declare-const |B=3.2| Int)" ; 3
+"(declare-const |C=1| Int)" ; 4
+"(declare-const |D=10.3.1| Int)" ; 5
+"(assert (=> (< 0 |D=10.3.1|) (< |D=10.3.1| |C=1|)))" ; 6
+"(assert (=> (< 0 |D=10.3.1|) (< |B=3.2| (- |D=10.3.1|))))" ; 7
+"(assert (=> (< 0 |C=1|) (< |C=1| |D=10.3.1|)))" ; 8
+"(assert (=> (< 0 |C=1|) (and (< |B=3.2| (- |C=1|)) (< |B=3.0| (- |C=1|)))))" ; 9
+"(assert (< 0 A=2.1))" ; 10
+"(check-sat)" ; 11
+"(get-model)" ; 12
+"(exit)" ; 13
+"(declare-const |A=2.1| Int)" ; 1
+"(declare-const |B=3.0| Int)" ; 2
+"(declare-const |B=3.2| Int)" ; 3
+"(declare-const |C=1| Int)" ; 4
+"(declare-const |D=10.3.1| Int)" ; 5
+"(assert (=> (< 0 |D=10.3.1|) (< |D=10.3.1| |C=1|)))" ; 6
+"(assert (=> (< 0 |D=10.3.1|) (< |B=3.2| (- |D=10.3.1|))))" ; 7
+"(assert (=> (< 0 |C=1|) (< |C=1| |D=10.3.1|)))" ; 8
+"(assert (=> (< 0 |C=1|) (and (< |B=3.2| (- |C=1|)) (< |B=3.0| (- |C=1|)))))" ; 9
+"(assert (=> (< 0 |A=2.1|) (and (or (< |A=2.1| |B=3.2|) (< |A=2.1| |C=1|)) (< |A=2.1| |D=10.3.1|))))" ; 10
+"" ; 11
+"(assert (< 0 A=2.1))" ; 12
+"(check-sat)" ; 13
+"(get-model)" ; 14
+"(exit)" ; 15

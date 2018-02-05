@@ -55,8 +55,8 @@ type RefString = Text
 data PkgConstr = PkgConstr Name (Maybe (Relation, Version)) deriving Show
 
 instance ToText PkgConstr where
-  toText (PkgConstr name (Just (rel, vers))) = name <> toText rel <> toText vers
-  toText (PkgConstr name _) = name
+  toText (PkgConstr name (Just (rel, vers))) = "|" <> name <> toText rel <> toText vers <> "|"
+  toText (PkgConstr name _) = "|" <> name <> "|"
 
 data Relation =  Lt | LtEq | Eq | GtEq | Gt deriving Show
 
@@ -92,12 +92,12 @@ data PkgMeta = PkgMeta
   { refString :: Text
   , version :: Version
   , size :: Integer
-  , depends :: [[(Polarity,PkgConstr)]]
-  , conflicts :: [(Polarity,PkgConstr)]
+  , depends :: [[PkgConstr]]
+  , conflicts :: [PkgConstr]
   , installed :: Bool
   } deriving Show
 
-repository :: FilePath -> IO (Map Name [PkgMeta])
+repository :: FilePath -> IO [(Name,PkgMeta)]
 repository wd = do
   raw <- B.readFile $ wd </> "repository.json"
   initial <- initial wd
@@ -109,12 +109,13 @@ constraints wd = do
   let Just cs = decode raw :: Maybe [Text]
   return $ map fromText cs
 
-initial :: FilePath -> IO (Set Text)
+initial :: FilePath -> IO [Text]
 initial wd = do
   raw <- B.readFile $ wd </> "initial.json"
   let Just cs = decode raw :: Maybe [Text]
   -- return $ Set.fromList $ map toRef cs
-  return $ Set.fromList cs
+  -- return $ Set.fromList cs
+  return cs
 
 instance {-# overlaps #-} FromJSON (Name, PkgMeta) where
   parseJSON = withObject "Package" $ \obj -> do
@@ -124,16 +125,17 @@ instance {-# overlaps #-} FromJSON (Name, PkgMeta) where
     size <- obj .: "size"
     dep <- obj .:? "depends" .!= []
     -- let depends = map (map (\constr -> (Plus,fromText constr))) dep :: [[(Polarity,PkgConstr)]]
-    let depends = map (map ((,) Plus . fromText)) dep :: [[(Polarity,PkgConstr)]]
+    let depends = map (map (fromText)) dep
     con <- obj .:? "conflicts" .!= []
-    let conflicts = map ((,) Minus . fromText) con
+    let conflicts = map (fromText) con
     return (name, PkgMeta refString version size depends conflicts False)
 
-parseRepo :: B.ByteString -> Set Text -> Map Name [PkgMeta]
-parseRepo raw initial =
-    let inp = V.toList $ fromJust $ decode raw :: [(Name, PkgMeta)] in
-    let pkgs = map (\(n,m) -> (n,[m{installed = refString m `Set.member` initial}])) inp in
-    fmap (sortBy $ comparing version) $ Map.fromListWith (++) pkgs
+-- parseRepo :: B.ByteString -> Set Text -> Map Name [PkgMeta]
+parseRepo raw initial = V.toList $ fromJust $ decode raw :: [(Name, PkgMeta)]
+    -- let inp = V.toList $ fromJust $ decode raw :: [(Name, PkgMeta)] in
+    -- let pkgs = map (\(n,m) -> (n,m{installed = refString m `Set.member` initial})) inp in
+    -- fmap (sortBy $ comparing version) $ Map.fromListWith (++) pkgs
+
 
 
 -- parseRepo :: B.ByteString -> Set Text -> Symbolic (Map Name [Pkg])
