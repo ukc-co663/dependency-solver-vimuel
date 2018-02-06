@@ -24,139 +24,138 @@ import System.Process
 import Data.List (sortBy)
 import Data.Ord (comparing)
 import System.IO
-import Parser
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 
 import Debug.Trace
 
-import Data.SBV.Control
+import Constraints
+import Parser
 
-go' path = do
-    result <- sat $ do
-      repo <- liftIO $ repository path
-      initial <- liftIO $ initial path
-      constraints <- liftIO $ constraints path
-      liftIO $ print $ length repo
-      repo <- forM (zip repo [1..]) $ \((name,pkgMeta),n) -> do
-        when (n `mod` 1000 == 0) (liftIO $ putStrLn $ show n ++ "/" ++ show (length repo))
-        symbOrd <- sInteger $ unpack $ refString pkgMeta
-        return (name,[(pkgMeta, symbOrd)])
-      traceM "done"
-      constrain true
-    print result
+-- Conj [Require "A", Not (Require "B")]
+
+compilePkgConstr :: Map Name [PkgMeta] -> Constraint PkgConstr -> Constraint PkgId
+compilePkgConstr repo constr =
+  case constr of
+    Require (PkgConstr name versionConstr) ->
+      case Map.lookup name repo of
+        Nothing -> F
+        Just pkgs -> Disj . map (Require . pkgId) . throwOut $ pkgs
+      where
+        throwOut = case versionConstr of
+            Nothing -> id
+            Just (rel, version) -> filter (\PkgMeta{version = v} -> toOperator rel v version)
+    Conj cs -> Conj . map (compilePkgConstr repo) $ cs
+    Disj cs -> Disj . map (compilePkgConstr repo) $ cs
+    Not c -> Not . compilePkgConstr repo $ c
+    T -> T
+    _ -> F
+
+
+
 
 go path = do
-    (Just hZ3In, _, _, z3) <- -- Just hZ3Out, Just hZ3Err, z3) <-
-      -- createProcess (proc "z3" ["-smt2","-in"])
-      createProcess (shell "time z3 -smt2 -in")
-        { std_in  = CreatePipe
-        , std_out = Inherit
-        , std_err = Inherit }
+    -- (Just hZ3In, _, _, z3) <- -- Just hZ3Out, Just hZ3Err, z3) <-
+    --   -- createProcess (proc "z3" ["-smt2","-in"])
+    --   createProcess (shell "time z3 -smt2 -in")
+    --     { std_in  = CreatePipe
+    --     , std_out = Inherit
+    --     , std_err = Inherit }
+    --
+    -- counter <- newIORef (1 :: Int)
+    -- let logging = True
+    -- let toZ3 constr = do
+    --       when logging $ do
+    --         i <- readIORef counter
+    --         appendFile "log.txt" $ show constr ++ " ; " ++ show i ++ "\n"
+    --         modifyIORef' counter succ
+    --       Text.hPutStrLn hZ3In constr
 
-    counter <- newIORef (1 :: Int)
-    let logging = True
-    let toZ3 constr = do
-          when logging $ do
-            i <- readIORef counter
-            appendFile "log.txt" $ show constr ++ " ; " ++ show i ++ "\n"
-            modifyIORef counter succ
-          Text.hPutStrLn hZ3In constr
 
-    repo <- repository path
-    initial :: [PkgConstr] <- map fromText <$> initial path
-    constraints <- constraints path
+    (repo, initial, target) <- parseInput path
 
-    forM_ repo $ \(name,pkgMeta) ->
-      toZ3 $ declarePkg $ refString pkgMeta
 
-    let ?repo = Map.fromListWith (++) (map (\(n,m) -> (n,[m])) repo)
+    let cs = compilePkgConstr repo $ target :: Constraint PkgId
 
-    -- forM_ repo $ \(_,p) -> do
-    --   toZ3 $ dependsConstraints p
-    --   toZ3 $ conflConstraints p
-    --   return ()
-
-    forM_ initial $ \constr -> do
-      let [p] = get constr
-      toZ3 $ dependsConstraints p
-      toZ3 $ conflConstraints p
+    traceM . show . toSmtLib . simplifyDeep $ cs
 
 
 
-    toZ3 . assertInstalled $ "scala-library=12373"
-    mapM_ toZ3
-      [ "(check-sat)"
-      , "(get-model)"
-      , "(exit)" ]
-
-    -- ready <- hWaitForInput hZ3Err (5 * 1000)
-    -- when ready $ putStrLn =<< hGetLine hZ3Err
-
-
-    hClose hZ3In
-    putStrLn "Finished."
-    -- terminateProcess z3
+    -- mapM_ toZ3
+    --   [ "(check-sat)"
+    --   , "(get-model)"
+    --   , "(exit)" ]
+    --
+    -- -- ready <- hWaitForInput hZ3Err (5 * 1000)
+    -- -- when ready $ putStrLn =<< hGetLine hZ3Err
+    --
+    --
+    -- hClose hZ3In
+    -- putStrLn "Finished."
+    -- -- terminateProcess z3
     return ()
 
 
-dependsConstraints p = mkConstr deps
-  where
-    deps = map (map get) (depends p) -- TODO (filter installed ?
-    mkConstr =
-      assert . ifInstalled this . conj . map (disj . map (disj . map ((this `dependsOn`) . refString)))
-    this = refString p
-
-conflConstraints p = mkConstr confls
-  where
-    confls = map get (conflicts p)
-    mkConstr =
-      assert . ifInstalled this . conj . map (conj . map ((this `conflictsWith`) . refString))
-    this = refString p
-
--- assertInstalled ps =
---   where
+-- getConstraints :: (?store :: IORef (Map (name,version) Text)) Name -> Version -> Text
+-- getConstraints (name,version) = do
+--   store <- readIORef ?store
+--   case Map.lookup (name,version) store of
+--     Just p ->
+--       return p
+--     Nothing ->
 --
+--       modifyIORef ?store (Map.insert )
 
-ifInstalled p q = case q of
-  "" -> ""
-  q -> "(=> (< 0 " <> p <> ") " <> q <> ")"
-
-dependsOn x "" = ""
-dependsOn x y = "(< " <> x <> " " <> y <> ")"
-
-conflictsWith x "" = ""
-conflictsWith x y = "(< " <> y <> " (- " <> x <> "))"
-
-disj ps = case filter (/= "") ps of
-  [] -> ""
-  [p] -> p
-  ps -> "(or " <> Text.intercalate " " ps <> ")"
-
-conj ps = case filter (/= "") ps of
-  [] -> ""
-  [p] -> p
-  ps -> "(and " <> Text.intercalate " " ps <> ")"
-
-assert x = case x of
-  "" -> ""
-  x -> "(assert " <> x <> ")"
-
-assertInstalled x = "(assert (< 0 " <> x <> "))"
-
--- not x = "(not " <> x <> ")"
-
-declarePkg x = "(declare-const " <> x <> " Int)"
-
-get :: (?repo :: Map Name [PkgMeta]) => PkgConstr -> [PkgMeta]
-get (PkgConstr name versionConstr) =
-  case Map.lookup name ?repo of
-    Nothing -> []
-    Just pkgs ->
-      case versionConstr of
-        Nothing -> pkgs
-        Just (r, version) -> filter (\PkgMeta{version = v} -> toOperator r v version) pkgs
-
+--
+-- dependsConstraints p = mkConstr deps
+--   where
+--     deps = map (map get) (depends p) -- TODO (filter installed ?
+--     mkConstr =
+--       assert . ifInstalled this . conj . map (disj . map (disj . map ((this `dependsOn`) . refString)))
+--     this = refString p
+--
+-- conflConstraints p = mkConstr confls
+--   where
+--     confls = map get (conflicts p)
+--     mkConstr =
+--       assert . ifInstalled this . conj . map (conj . map ((this `conflictsWith`) . refString))
+--     this = refString p
+--
+-- -- assertInstalled ps =
+-- --   where
+-- --
+--
+-- ifInstalled p q = case q of
+--   "" -> ""
+--   q -> "(=> (< 0 " <> p <> ") " <> q <> ")"
+--
+-- dependsOn x "" = ""
+-- dependsOn x y = "(< " <> x <> " " <> y <> ")"
+--
+-- conflictsWith x "" = ""
+-- conflictsWith x y = "(< " <> y <> " (- " <> x <> "))"
+--
+-- disj ps = case filter (/= "") ps of
+--   [] -> ""
+--   [p] -> p
+--   ps -> "(or " <> Text.intercalate " " ps <> ")"
+--
+-- conj ps = case filter (/= "") ps of
+--   [] -> ""
+--   [p] -> p
+--   ps -> "(and " <> Text.intercalate " " ps <> ")"
+--
+-- assert x = case x of
+--   "" -> ""
+--   x -> "(assert " <> x <> ")"
+--
+-- assertInstalled x = "(assert (< 0 " <> x <> "))"
+--
+-- -- not x = "(not " <> x <> ")"
+--
+-- declarePkg x = "(declare-const " <> x <> " Int)"
+--
+--
 
 
 

@@ -37,26 +37,24 @@ import Data.Foldable (foldl')
 
 import Debug.Trace
 
+import Constraints
+
 class ToText a where
   toText :: a -> Text
   toString :: a -> String
   toString = T.unpack . toText
 
-data Polarity = Plus | Minus deriving Show
 
-instance ToText (Polarity, PkgConstr) where
-  toText (Plus, r) = "+" <> toText r
-  toText (Minus, r) = "-" <> toText r
 
 type Name = Text
-
-type RefString = Text
 
 data PkgConstr = PkgConstr Name (Maybe (Relation, Version)) deriving Show
 
 instance ToText PkgConstr where
-  toText (PkgConstr name (Just (rel, vers))) = "|" <> name <> toText rel <> toText vers <> "|"
-  toText (PkgConstr name _) = "|" <> name <> "|"
+  toText (PkgConstr name (Just (rel, vers))) = name <> toText rel <> toText vers
+  toText (PkgConstr name _) = name
+  -- toText (PkgConstr name (Just (rel, vers))) = "|" <> name <> toText rel <> toText vers <> "|"
+  -- toText (PkgConstr name _) = "|" <> name <> "|"
 
 data Relation =  Lt | LtEq | Eq | GtEq | Gt deriving Show
 
@@ -81,15 +79,8 @@ type Version = [Word]
 instance ToText Version where
   toText = T.intercalate "." . map (T.pack . show)
 
--- data Pkg = Pkg
---   { name :: Name
---   , meta :: PkgMeta
---   , ordering :: SInteger
---   , cost :: SInteger
---   } deriving Show
-
 data PkgMeta = PkgMeta
-  { refString :: Text
+  { pkgId :: PkgId
   , version :: Version
   , size :: Integer
   , depends :: [[PkgConstr]]
@@ -97,17 +88,25 @@ data PkgMeta = PkgMeta
   , installed :: Bool
   } deriving Show
 
-repository :: FilePath -> IO [(Name,PkgMeta)]
+parseInput :: FilePath -> IO (Map Name [PkgMeta],[Text],Constraint PkgConstr)
+parseInput wd = do
+  r <- repository wd
+  i <- initial wd
+  c <- constraints wd
+  return (r,i,c)
+
+repository :: FilePath -> IO (Map Name [PkgMeta])
 repository wd = do
   raw <- B.readFile $ wd </> "repository.json"
   initial <- initial wd
-  return $ parseRepo raw initial
+  let mkRepo = Map.fromListWith (++) . map (\(n,m) -> (n,[m]))
+  return . mkRepo . parseRepo raw $ initial
 
-constraints :: FilePath -> IO [(Polarity,PkgConstr)]
+constraints :: FilePath -> IO (Constraint PkgConstr)
 constraints wd = do
   raw <- B.readFile $ wd </> "constraints.json"
   let Just cs = decode raw :: Maybe [Text]
-  return $ map fromText cs
+  return . Conj $ map fromText cs
 
 initial :: FilePath -> IO [Text]
 initial wd = do
@@ -121,14 +120,14 @@ instance {-# overlaps #-} FromJSON (Name, PkgMeta) where
   parseJSON = withObject "Package" $ \obj -> do
     name <- obj .: "name"
     version <- fmap fromText $ obj .: "version"
-    let refString = toText $ PkgConstr name (Just (Eq, version))
+    let pkgId = PkgId . toText $ PkgConstr name (Just (Eq, version))
     size <- obj .: "size"
     dep <- obj .:? "depends" .!= []
     -- let depends = map (map (\constr -> (Plus,fromText constr))) dep :: [[(Polarity,PkgConstr)]]
     let depends = map (map (fromText)) dep
     con <- obj .:? "conflicts" .!= []
     let conflicts = map (fromText) con
-    return (name, PkgMeta refString version size depends conflicts False)
+    return (name, PkgMeta pkgId version size depends conflicts False)
 
 -- parseRepo :: B.ByteString -> Set Text -> Map Name [PkgMeta]
 parseRepo raw initial = V.toList $ fromJust $ decode raw :: [(Name, PkgMeta)]
@@ -176,7 +175,7 @@ instance FromText Relation where
     ">=" -> GtEq
     ">" -> Gt
 
-instance FromText (Polarity,PkgConstr) where
+instance FromText (Constraint PkgConstr) where
   fromText inp = case T.uncons inp of
-    Just ('+', rest) -> (Plus,(fromText rest))
-    Just ('-', rest) -> (Minus,(fromText rest))
+    Just ('+', rest) -> Require (fromText rest)
+    Just ('-', rest) -> Not $ Require (fromText rest)
