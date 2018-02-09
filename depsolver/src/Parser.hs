@@ -44,17 +44,24 @@ class ToText a where
   toString :: a -> String
   toString = T.unpack . toText
 
-
-
 type Name = Text
+
+type PkgId = (Name, Version)
+
+instance ToSmtLib PkgId where
+  toSmtLib pkgId = "|" <> toText pkgId <> "|"
+
+instance ToSmtLib Pkg where
+  toSmtLib = toSmtLib . pkgId
+
+instance ToText PkgId where
+  toText (name,version) = name <> "=" <> toText version
 
 data PkgConstr = PkgConstr Name (Maybe (Relation, Version)) deriving Show
 
-instance ToText PkgConstr where
-  toText (PkgConstr name (Just (rel, vers))) = name <> toText rel <> toText vers
-  toText (PkgConstr name _) = name
-  -- toText (PkgConstr name (Just (rel, vers))) = "|" <> name <> toText rel <> toText vers <> "|"
-  -- toText (PkgConstr name _) = "|" <> name <> "|"
+-- instance ToText PkgConstr where
+--   toText (PkgConstr name (Just (rel, vers))) = name <> toText rel <> toText vers
+--   toText (PkgConstr name _) = name
 
 data Relation =  Lt | LtEq | Eq | GtEq | Gt deriving Show
 
@@ -79,28 +86,39 @@ type Version = [Word]
 instance ToText Version where
   toText = T.intercalate "." . map (T.pack . show)
 
-data PkgMeta = PkgMeta
-  { pkgId :: PkgId
-  , version :: Version
+data Pkg = Pkg
+  { pkgId :: (Name, Version)
   , size :: Integer
-  , depends :: [[PkgConstr]]
-  , conflicts :: [PkgConstr]
-  , installed :: Bool
+  , depends :: [[PkgConstr]]  -- [[PkgConstr]]
+  , conflicts :: [PkgConstr]  -- [PkgConstr]
   } deriving Show
 
-parseInput :: FilePath -> IO (Map Name [PkgMeta],[Text],Constraint PkgConstr)
+instance Eq Pkg where
+  p == q = pkgId p == pkgId q
+
+instance Ord Pkg where
+  compare p q = compare (pkgId p) (pkgId q)
+
+name :: Pkg -> Name
+name = fst . pkgId
+
+version :: Pkg -> Version
+version = snd . pkgId
+
+parseInput :: FilePath -> IO (Map Name [Pkg],Set PkgId,Constraint PkgConstr)
 parseInput wd = do
   r <- repository wd
   i <- initial wd
   c <- constraints wd
   return (r,i,c)
 
-repository :: FilePath -> IO (Map Name [PkgMeta])
+repository :: FilePath -> IO (Map Name [Pkg])
 repository wd = do
   raw <- B.readFile $ wd </> "repository.json"
   initial <- initial wd
-  let mkRepo = Map.fromListWith (++) . map (\(n,m) -> (n,[m]))
-  return . mkRepo . parseRepo raw $ initial
+  let parseRepo = V.toList . fromJust . decode
+      mkRepo = Map.fromListWith (++) . map (\(n,m) -> (n,[m]))
+  return . mkRepo . parseRepo $ raw
 
 constraints :: FilePath -> IO (Constraint PkgConstr)
 constraints wd = do
@@ -108,49 +126,23 @@ constraints wd = do
   let Just cs = decode raw :: Maybe [Text]
   return . Conj $ map fromText cs
 
-initial :: FilePath -> IO [Text]
+initial :: FilePath -> IO (Set PkgId)
 initial wd = do
   raw <- B.readFile $ wd </> "initial.json"
-  let Just cs = decode raw :: Maybe [Text]
-  -- return $ Set.fromList $ map toRef cs
+  let Just cs = decode raw
+  return . Set.fromList . map fromText $ cs
   -- return $ Set.fromList cs
-  return cs
+  -- return cs
 
-instance {-# overlaps #-} FromJSON (Name, PkgMeta) where
+instance {-# overlaps #-} FromJSON (Name, Pkg) where
   parseJSON = withObject "Package" $ \obj -> do
     name <- obj .: "name"
     version <- fmap fromText $ obj .: "version"
-    let pkgId = PkgId . toText $ PkgConstr name (Just (Eq, version))
     size <- obj .: "size"
-    dep <- obj .:? "depends" .!= []
-    -- let depends = map (map (\constr -> (Plus,fromText constr))) dep :: [[(Polarity,PkgConstr)]]
-    let depends = map (map (fromText)) dep
-    con <- obj .:? "conflicts" .!= []
-    let conflicts = map (fromText) con
-    return (name, PkgMeta pkgId version size depends conflicts False)
+    depends <- map (map (fromText)) <$> obj .:? "depends" .!= [] ---- TODO Empty should be T!!!!!!!!!!!!!!!!!!!!
+    conflicts <- map (fromText) <$> obj .:? "conflicts" .!= [] ---- TODO Empty should be T!!!!!!!!!!!!!!!!!!!!
+    return (name, Pkg (name,version) size depends conflicts)
 
--- parseRepo :: B.ByteString -> Set Text -> Map Name [PkgMeta]
-parseRepo raw initial = V.toList $ fromJust $ decode raw :: [(Name, PkgMeta)]
-    -- let inp = V.toList $ fromJust $ decode raw :: [(Name, PkgMeta)] in
-    -- let pkgs = map (\(n,m) -> (n,m{installed = refString m `Set.member` initial})) inp in
-    -- fmap (sortBy $ comparing version) $ Map.fromListWith (++) pkgs
-
-
-
--- parseRepo :: B.ByteString -> Set Text -> Symbolic (Map Name [Pkg])
--- parseRepo raw initial = do
---     let inp = V.toList $ fromJust $ decode raw :: [(Name, PkgMeta)]
---     pkgs <- mapM toPkg inp
---     return $ fmap (sortBy $ comparing (version . meta)) $ Map.fromListWith (++) pkgs
---   where
---     toPkg :: (Name, PkgMeta) -> Symbolic (Name, [Pkg])
---     toPkg (name, meta) = do
---         ordering <- sInteger (T.unpack $ refString meta)
---         let installed = refString meta `Set.member` initial
---             costT = if installed then       0 else fromInteger $ size meta
---             costF = if installed then 1000000 else 0
---             cost = ite (ordering .> 0) costT costF
---         return $ (name, [Pkg name meta ordering installed cost])
 
 class FromText a where
   fromText :: Text -> a
@@ -160,6 +152,12 @@ class FromText a where
 instance FromText Version where
   fromText "" = []
   fromText str = map unwrap $ T.splitOn "." str where unwrap x = case decimal x of Right (n,_) -> n
+
+instance FromText PkgId where
+  fromText inp = case T.span (\c -> isAlphaNum c || (c == '-') || (c == '.') || (c == '+')) inp of
+    (name,rest) -> case T.uncons rest of
+      Just ('=',vers) -> (name,fromText vers)
+      Nothing -> error "unexpected package id format."
 
 instance FromText PkgConstr where
   fromText inp = case T.span (\c -> isAlphaNum c || (c == '-') || (c == '.') || (c == '+')) inp of
@@ -177,5 +175,11 @@ instance FromText Relation where
 
 instance FromText (Constraint PkgConstr) where
   fromText inp = case T.uncons inp of
-    Just ('+', rest) -> Require (fromText rest)
-    Just ('-', rest) -> Not $ Require (fromText rest)
+    Just ('+', rest) -> Installed (fromText rest)
+    Just ('-', rest) -> Not $ Installed (fromText rest)
+    _ -> error $ show inp
+
+
+
+-- mkConditionalConstraint :: a -> Constraint a -> Constraint a -> Constraint a
+-- mkConditionalConstraint p c = If (Installed p) (Conj [deps,confls])

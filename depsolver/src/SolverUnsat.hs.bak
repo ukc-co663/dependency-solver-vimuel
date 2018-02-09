@@ -44,7 +44,7 @@ go path = do
 
 opt p = do
     setOption $ ProduceUnsatCores True
-    ps <- installSome p
+    ps <- installInstall p
     let rel = case Plus of Plus -> (.> 0); Minus -> (.< 0)
     constrain $ bOr $ map rel ps
     cost <- liftIO $ readIORef ?cost
@@ -61,26 +61,26 @@ opt p = do
           --         ?repo = repo
           --         ?reached = Set.empty
           --         ?cost = cost
-          --     ps <- installSome (fromString "+A")
+          --     ps <- installInstall (fromString "+A")
           --     let rel = case Plus of Plus -> (.> 0); Minus -> (.< 0)
           --     constrain $ bOr $ map rel ps
           --     cost <- liftIO $ readIORef cost
           --     minimize "*cost*" cost
 
-get :: (?repo :: Map Name [PkgMeta]) => PkgConstr -> Maybe [PkgMeta]
+get :: (?repo :: Map Name [Pkg]) => PkgConstr -> Maybe [Pkg]
 get (PkgConstr name versionConstr) = do
   pkgs <- Map.lookup name ?repo
   case versionConstr of
     Nothing -> return pkgs
-    Just (r, version) -> return $ filter (\PkgMeta{version = v} -> toOperator r v version) pkgs
+    Just (r, version) -> return $ filter (\Pkg{version = v} -> toOperator r v version) pkgs
 
-installSome :: ( ?repo :: Map Name [PkgMeta]
+installInstall :: ( ?repo :: Map Name [Pkg]
                , ?pkgs :: IORef (Map (Name,Version) SInteger)
                , ?reached :: Set (Name,Version)
                , ?cost :: IORef SInteger
                )
             => (Polarity,PkgConstr) -> Symbolic [SInteger]
-installSome (polarity,pc@(PkgConstr name _)) =
+installInstall (polarity,pc@(PkgConstr name _)) =
   case get pc of
     Nothing -> return []
     Just ps -> catMaybes <$> mapM (install name) ps
@@ -92,13 +92,13 @@ installSome (polarity,pc@(PkgConstr name _)) =
 
         -- constrain $ ordering .> 0
 
-install :: ( ?repo :: Map Name [PkgMeta]
+install :: ( ?repo :: Map Name [Pkg]
            , ?pkgs :: IORef (Map (Name,Version) SInteger)
            , ?reached :: Set (Name,Version)
            , ?cost :: IORef SInteger
            )
-        => Name -> PkgMeta -> Symbolic (Maybe SInteger)
-install name meta@(PkgMeta refString version size depends conflicts installed) =
+        => Name -> Pkg -> Symbolic (Maybe SInteger)
+install name meta@(Pkg refString version size depends conflicts installed) =
     if not installed && (name,version) `Set.member` ?reached
       then return Nothing -- cyclical dependency
       else let ?reached = Set.insert (name,version) ?reached in do
@@ -114,8 +114,8 @@ install name meta@(PkgMeta refString version size depends conflicts installed) =
                 cost = ite (thisOrdering .> 0) costT costF
             liftIO $ modifyIORef ?cost (+ cost)
             unless ((name,version) `Set.member` ?reached) $ do -- avoid going in cycles TODO
-              dependencies <- mapM (concatMapM installSome) depends
-              conflicts <- concatMapM installSome conflicts
+              dependencies <- mapM (concatMapM installInstall) depends
+              conflicts <- concatMapM installInstall conflicts
               namedConstraint ("Dependencies for " ++ unpack refString)
                               $ thisOrdering .> 0 ==>
                                   bAnd (map (bOr . map (thisOrdering .<)) dependencies)

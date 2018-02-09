@@ -1,6 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE FlexibleInstances #-}
 -- {-# LANGUAGE Strict #-}
 module Solver where
 
@@ -32,67 +34,123 @@ import Debug.Trace
 import Constraints
 import Parser
 
--- Conj [Require "A", Not (Require "B")]
+-- Conj [Installed "A", Not (Installed "B")]
 
-compilePkgConstr :: Map Name [PkgMeta] -> Constraint PkgConstr -> Constraint PkgId
-compilePkgConstr repo constr =
-  case constr of
-    Require (PkgConstr name versionConstr) ->
-      case Map.lookup name repo of
-        Nothing -> F
-        Just pkgs -> Disj . map (Require . pkgId) . throwOut $ pkgs
-      where
-        throwOut = case versionConstr of
-            Nothing -> id
-            Just (rel, version) -> filter (\PkgMeta{version = v} -> toOperator rel v version)
-    Conj cs -> Conj . map (compilePkgConstr repo) $ cs
-    Disj cs -> Disj . map (compilePkgConstr repo) $ cs
-    Not c -> Not . compilePkgConstr repo $ c
-    T -> T
-    _ -> F
+-- compilePkgConstr :: Map Name [Pkg] -> Constraint PkgConstr -> Constraint Pkg
+-- compilePkgConstr repo constr =
+--   case constr of
+--     Installed (PkgConstr name versionConstr) ->
+--       case Map.lookup name repo of
+--         Nothing -> F
+--         Just
+--     Conj cs -> Conj . map (compilePkgConstr repo) $ cs
+--     Disj cs -> Disj . map (compilePkgConstr repo) $ cs
+--     Not c -> Not . compilePkgConstr repo $ c
+--     T -> T
+--     _ -> F
+{--
+```Depends (Any "A") (Any "B")```
+where `Any "A"` is some key, that maps to, say, `Disj ["A1", "A2"]`. So I `fmap`my lookup function and get:
+```Depends (Disj ["A1", "A2"]) (Disj ["B1","B2"])
+```
+Then, I want my `join` to give me the disjunction of the cartesian product of the dependencies
+```Disj [Depends "A1" "B1",Depends "A1" "B2",Depends "A2" "B1",Depends "A2" "B2"]```
+
+Depends (Conj ["
+--}
+
+class Compile a where
+  compile :: Map Name [Pkg] -> a -> Constraint Pkg
+
+instance Compile (Constraint PkgConstr) where
+  compile repo = join . fmap (compile repo)
+
+instance Compile PkgConstr where
+  compile repo (PkgConstr name versionConstr) =
+    case Map.lookup name repo of
+      Nothing -> F
+      Just pkgs -> Disj . map Installed . throwOut $ pkgs
+    where
+      throwOut = case versionConstr of
+          Nothing -> id
+          Just (r,v) -> filter $ \p -> toOperator r v (version p)
+
+instance Compile Pkg where
+  compile repo pkg = If (Installed pkg) (Conj [deps pkg,confs pkg])
+    where
+      deps = Conj . map (Disj . map compileDs) . depends
+      confs = Conj . map compileCs . conflicts
+
+      compileDs (PkgConstr name versionConstr) =
+        case Map.lookup name repo of
+          Nothing -> F
+          Just pkgs -> Disj . map (Depends pkg) . throwOut $ pkgs
+        where
+          throwOut = case versionConstr of
+              Nothing -> id
+              Just (r,v) -> filter $ \p -> toOperator r v (version p)
+
+      compileCs (PkgConstr name versionConstr) =
+        case Map.lookup name repo of
+          Nothing -> F
+          Just pkgs -> Disj . map (Conflicts pkg) . throwOut $ pkgs
+        where
+          throwOut = case versionConstr of
+              Nothing -> id
+              Just (r,v) -> filter $ \p -> toOperator r v (version p)
 
 
+instance ToSmtLib SmtLibStmt where
+  toSmtLib (Assert c) = "(assert " <> toSmtLib (simplifyDeep c) <> ")"
+  toSmtLib (DeclareVar v) = "(declare-const " <> toSmtLib v <> " Int)"
+  toSmtLib Submit = "(check-sat)\n(get-model)\n(exit)"
 
+data SmtLibStmt
+  = Assert (Constraint Pkg)
+  | DeclareVar Pkg
+  | Submit
 
 go path = do
-    -- (Just hZ3In, _, _, z3) <- -- Just hZ3Out, Just hZ3Err, z3) <-
-    --   -- createProcess (proc "z3" ["-smt2","-in"])
-    --   createProcess (shell "time z3 -smt2 -in")
-    --     { std_in  = CreatePipe
-    --     , std_out = Inherit
-    --     , std_err = Inherit }
-    --
-    -- counter <- newIORef (1 :: Int)
-    -- let logging = True
-    -- let toZ3 constr = do
-    --       when logging $ do
-    --         i <- readIORef counter
-    --         appendFile "log.txt" $ show constr ++ " ; " ++ show i ++ "\n"
-    --         modifyIORef' counter succ
-    --       Text.hPutStrLn hZ3In constr
+    (Just hZ3In, _, _, z3) <- -- Just hZ3Out, Just hZ3Err, z3) <-
+      -- createProcess (proc "z3" ["-smt2","-in"])
+      createProcess (shell "time z3 -smt2 -in")
+        { std_in  = CreatePipe
+        , std_out = Inherit
+        , std_err = Inherit }
+
+    counter <- newIORef (1 :: Int)
+    let logging = True
+    let toZ3 constraint = do
+          let constr = toSmtLib constraint
+          when logging $ do
+            i <- readIORef counter
+            Text.appendFile "log.txt" $ constr <> " ; " <> Text.pack (show i) <> "\n"
+            modifyIORef' counter succ
+          Text.hPutStrLn hZ3In constr
 
 
     (repo, initial, target) <- parseInput path
 
 
-    let cs = compilePkgConstr repo $ target :: Constraint PkgId
+    let targetConstraints = compile repo $ target
+        pkgs = usedIn targetConstraints
 
-    traceM . show . toSmtLib . simplifyDeep $ cs
+        -- TODO: Now, for each package, compile its constraints.
+
+    mapM_ (toZ3 . DeclareVar) (concatMap snd . Map.toList $ repo)
+    toZ3 $ Assert targetConstraints
+    mapM_ (toZ3 . Assert . compile repo) pkgs
+    toZ3 Submit
 
 
 
-    -- mapM_ toZ3
-    --   [ "(check-sat)"
-    --   , "(get-model)"
-    --   , "(exit)" ]
-    --
-    -- -- ready <- hWaitForInput hZ3Err (5 * 1000)
-    -- -- when ready $ putStrLn =<< hGetLine hZ3Err
-    --
-    --
-    -- hClose hZ3In
-    -- putStrLn "Finished."
-    -- -- terminateProcess z3
+    -- ready <- hWaitForInput hZ3Err (5 * 1000)
+    -- when ready $ putStrLn =<< hGetLine hZ3Err
+
+
+    hClose hZ3In
+    putStrLn "Finished."
+    -- terminateProcess z3
     return ()
 
 
@@ -203,13 +261,13 @@ opt ps = optimize Lexicographic $ do
   traceM $ show $ length ?initial
   forM_ (zip ?initial [1..]) $ \(p,n) -> do
     -- traceM $ unpack p ++ " is in initial."
-    [p] <- installSome $ fromText p
+    [p] <- installInstall $ fromText p
     -- when (n `mod` 100 == 0) (traceM $ show n
     traceM $ show n
     return ()
 
   forM_ ps $ \p@(polarity,constr) -> do
-    ps <- map fst <$> installSome constr
+    ps <- map fst <$> installInstall constr
     case polarity of
       Plus -> constrain $ bOr $ map (.> 0) ps
       Minus -> constrain $ bAnd $ map (.< 0) ps
@@ -221,23 +279,23 @@ opt ps = optimize Lexicographic $ do
 -}
 
 {- ------------------------
-get :: (?repo :: Map Name [PkgMeta]) => PkgConstr -> [PkgMeta]
+get :: (?repo :: Map Name [Pkg]) => PkgConstr -> [Pkg]
 get (PkgConstr name versionConstr) =
   case Map.lookup name ?repo of
     Nothing -> []
     Just pkgs ->
       case versionConstr of
         Nothing -> pkgs
-        Just (r, version) -> filter (\PkgMeta{version = v} -> toOperator r v version) pkgs
+        Just (r, version) -> filter (\Pkg{version = v} -> toOperator r v version) pkgs
 
--- installSome :: ( ?repo :: Map Name [PkgMeta]
+-- installInstall :: ( ?repo :: Map Name [Pkg]
 --                , ?pkgOrds :: IORef (Map (Name,Version) SInteger)
 --                , ?reached :: Set ((Name,Version), Maybe (Name,Version))
 --                , ?cost :: IORef SInteger )
 --             => PkgConstr -> Symbolic [SInteger]
 mkConstraints pc@(PkgConstr name _) = mapM (mkConstraint name) (get pc)
 
-getSymbolicOrdering name (PkgMeta refString version size _ _ installed) = do
+getSymbolicOrdering name (Pkg refString version size _ _ installed) = do
     pkgOrds <- liftIO $ readIORef ?pkgOrds
     case Map.lookup (name, version) pkgOrds of
       Just p -> return p
@@ -250,16 +308,16 @@ getSymbolicOrdering name (PkgMeta refString version size _ _ installed) = do
         liftIO $ modifyIORef ?cost (+ cost)
         return p
 
-mkConstraint :: ( ?repo :: Map Name [PkgMeta]
+mkConstraint :: ( ?repo :: Map Name [Pkg]
            , ?pkgOrds :: IORef (Map (Name,Version) SInteger)
            , ?reached :: Map (Name,Version) (Bool, SInteger)
            , ?cost :: IORef SInteger )
-        => Name -> PkgMeta -> Symbolic ()
-mkConstraint name meta@(PkgMeta refString version size depends conflicts inInitial) = do
+        => Name -> Pkg -> Symbolic ()
+mkConstraint name meta@(Pkg refString version size depends conflicts inInitial) = do
     thisOrdering <- getSymbolicOrdering name meta
 
     dependencies <- mapM (concatMapM getSymbolicOrdering) depends
-    conflicts <- map fst <$> concatMapM installSome conflicts
+    conflicts <- map fst <$> concatMapM installInstall conflicts
     -- traceM $ show conflicts ++ " conflict with " ++ show (name, version)
     constrain $ thisOrdering .> 0 ==>
                   bAnd (map (bOr . map (\(dep, dInInit)
@@ -268,12 +326,12 @@ mkConstraint name meta@(PkgMeta refString version size depends conflicts inIniti
 -----------------------------------------------}
 
 {-
-install :: ( ?repo :: Map Name [PkgMeta]
+install :: ( ?repo :: Map Name [Pkg]
            , ?pkgOrds :: IORef (Map (Name,Version) SInteger)
            , ?reached :: Map (Name,Version) (Bool, SInteger)
            , ?cost :: IORef SInteger )
-        => Name -> PkgMeta -> Symbolic (SInteger, Bool)
-install name meta@(PkgMeta refString version size depends conflicts inInitial) = do
+        => Name -> Pkg -> Symbolic (SInteger, Bool)
+install name meta@(Pkg refString version size depends conflicts inInitial) = do
 
     thisOrdering <- getSymbolicOrdering name meta
 
@@ -291,8 +349,8 @@ install name meta@(PkgMeta refString version size depends conflicts inInitial) =
 
         -- unless (installed && (name,version) `Set.member` ?reached) $ do -- avoid going in cycles TODO
 
-        dependencies <- mapM (concatMapM installSome) depends
-        conflicts <- map fst <$> concatMapM installSome conflicts
+        dependencies <- mapM (concatMapM installInstall) depends
+        conflicts <- map fst <$> concatMapM installInstall conflicts
         -- traceM $ show conflicts ++ " conflict with " ++ show (name, version)
         constrain $ thisOrdering .> 0 ==>
                       bAnd (map (bOr . map (\(dep, dInInit)
@@ -309,13 +367,13 @@ install name meta@(PkgMeta refString version size depends conflicts inInitial) =
 
 
 {-
-install :: ( ?repo :: Map Name [PkgMeta]
+install :: ( ?repo :: Map Name [Pkg]
            , ?pkgOrds :: IORef (Map (Name,Version) SInteger)
            , ?reached :: Set (Name,Version)
            , ?cost :: IORef SInteger
            )
-        => Name -> PkgMeta -> Symbolic (Maybe SInteger)
-install name meta@(PkgMeta refString version size depends conflicts installed) =
+        => Name -> Pkg -> Symbolic (Maybe SInteger)
+install name meta@(Pkg refString version size depends conflicts installed) =
     if {- not installed && -} (name,version) `Set.member` ?reached
       then do
         liftIO $ putStrLn $ "Cyclical dependency: " ++ unpack name ++ toString version
@@ -333,8 +391,8 @@ install name meta@(PkgMeta refString version size depends conflicts installed) =
                 cost = ite (thisOrdering .> 0) costT costF
             liftIO $ modifyIORef ?cost (+ cost)
             -- unless (installed && (name,version) `Set.member` ?reached) $ do -- avoid going in cycles TODO
-            dependencies <- mapM (concatMapM installSome) depends
-            conflicts <- concatMapM installSome conflicts
+            dependencies <- mapM (concatMapM installInstall) depends
+            conflicts <- concatMapM installInstall conflicts
             traceM $ show conflicts ++ " conflict with " ++ show (name, version)
             constrain $ thisOrdering .> 0 ==>
                           bAnd (map (bOr . map (thisOrdering .<)) dependencies)
