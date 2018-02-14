@@ -4,6 +4,9 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE Strict #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE KindSignatures #-}
 
 module Constraints
   -- ( Constraint(..)
@@ -20,7 +23,9 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.String (IsString)
 import Data.Monoid
-import Data.List (intersperse)
+import Data.List (nub)
+
+import Data.Morphism.Cata
 
 
 {-| [+A,-B,+C] would be Conj [Installed "A", Not (Installed "B"), Installed "C"] -}
@@ -29,13 +34,15 @@ data Constraint a
   | T                                 -- ^ trivially true constraint
   | Installed a                            -- ^ assert that installed (A > 0)
   | Depends a a                       -- ^ left depends on right to be installed first (A < B)
-  | DependsInit a a                   -- 
+  | DependsInit a a                   --
   | Conflicts a a                     -- ^ left requires right to be uninstalled first (-A > B)
   | If (Constraint a) (Constraint a)  -- ^ left implies right ((A > 0) => (A < B))
   | Conj [Constraint a]               -- ^ conjunction of constraints, NB: simplify empty to F
   | Disj [Constraint a]               -- ^ disjunction of constraints, NB: simplify empty to F
   | Not (Constraint a)                -- ^ invert a constraint (not (A > 0))
   deriving (Eq, Foldable, Functor, Show)
+
+$(makeCata defaultOptions { cataName = "cata" } ''Constraint)
 
 {--
 join $ Depends (Any "A") (Any "B")
@@ -46,18 +53,23 @@ join $ If (Installed (Any "A")) (
 
 --}
 
-join :: Constraint (Constraint a) -> Constraint a
-join = \case
-  F -> F
-  T -> T
-  Installed x -> x
-  Not c -> Not . join $ c
-  -- Depends (Disj cs) (Disj cs') ->
-  Depends x y -> error "join of Depends not implemented"
-  Conflicts x y -> error "join of Conflicts not implemented"
-  If c1 c2 -> If (join c1) (join c2)
-  Conj cs -> Conj $ map join cs
-  Disj cs -> Disj $ map join cs
+-- depsConfls :: Constraint a -> [a]
+-- depsConfls = cata [] [] (const []) (\c1 c2 -> [c1,c2]) (\c1 c2 -> [c1,c2]) (\c1 c2 -> [c1,c2]) (\_ c2 -> c2) (concatMap depsConfls) (concatMap depsConfls) id
+
+
+
+-- join :: Constraint (Constraint a) -> Constraint a
+-- join = \case
+--   F -> F
+--   T -> T
+--   Installed x -> x
+--   Not c -> Not . join $ c
+--   -- Depends (Disj cs) (Disj cs') ->
+--   Depends x y -> error "join of Depends not implemented"
+--   Conflicts x y -> error "join of Conflicts not implemented"
+--   If c1 c2 -> If (join c1) (join c2)
+--   Conj cs -> Conj $ map join cs
+--   Disj cs -> Disj $ map join cs
 
 -- instance Applicative Constraint a where
 --   pure = Installed
@@ -71,26 +83,7 @@ join = \case
 --     _        <*> _        = Nothing
 
 -- | E.g. "A=1.2"
-type Output = Text
 
-class ToSmtLib a where
-  toSmtLib :: a -> Output
-
-
-instance ToSmtLib a => ToSmtLib (Constraint a) where
-  toSmtLib = \case
-    F -> "false"
-    T -> "true"
-    Installed x -> "(> " <> toSmtLib x <> " 0)"
-    Depends x y -> "(< " <> toSmtLib x <> " " <> toSmtLib y <> ")"
-    DependsInit x y -> "(<= " <> toSmtLib x <> " " <> toSmtLib y <> ")"
-    Conflicts x y -> "(> (- " <> toSmtLib x <> ") " <> toSmtLib y <> ")"
-    If c1 c2 -> "(=> " <> toSmtLib c1 <> " " <> toSmtLib c2 <> ")"
-    -- Depends x y -> "((=> (> " <> toSmtLib x <> " 0) (<" <> toSmtLib x <> " " <> toSmtLib y <> "))"
-    -- Conflicts x y -> "((=> (> " <> toSmtLib x <> " 0) (> (- " <> toSmtLib x <> ") " <> toSmtLib y <> "))"
-    Conj cs -> "(and " <> (mconcat . intersperse " " . map toSmtLib) cs <> ")"
-    Disj cs -> mconcat ["(or ",(mconcat . intersperse " " . map toSmtLib) cs,")"]
-    Not x -> mconcat ["(not ",toSmtLib x,")"]
 
 {-|
 >>> simplify $ Conj [Installed "A"]
@@ -100,40 +93,52 @@ Installed "A"
 Not Empty
 
 NB: Use 'simplifyDeep' to put into simplest form.
->>> simplify $ Disj [Conj [Disj [Conj [Disj [], Disj [F]]], Disj []], Disj [Depends "A" "B", Depends "A" "C"]]
-Disj [Disj [Depends "A" "B",Depends "A" "C"]]
+>>> simplify $ Conj [Conj [Disj [Conj [Disj [], Disj [F]]], Disj []], Disj [Depends "A" "B", Depends "A" "C"]]
+Disj [Depends "A" "B",Depends "A" "C"]
 -}
 simplify :: Eq a => Constraint a -> Constraint a
 simplify c =
   case c of
-    Installed a -> Installed a
-    Depends a b -> Depends a b
-    Conflicts a b -> Conflicts a b
-    Conj [] -> T -- ????????????????????
-    Disj [] -> T -- ????????????????????
-    Conj [c] -> simplify c
-    Disj [c] -> simplify c
-    Conj cs -> let cs' = filter (/= T) $ map simplify cs in if F `elem` cs' then F else Conj cs' -- TODO enforces Eq constraint on 'a :(
-    Disj cs -> let cs' = filter (/= F) $ map simplify cs in if T `elem` cs' then T else Disj cs'
-    Not (Not c) -> simplify c
-    Not F -> T
-    Not T -> F
-    If F _ -> T
-    If T c -> simplify c
-    If c1 c2 -> If (simplify c1) (simplify c2)
-    Not c -> Not $ simplify c
-    T -> T
-    F -> F
+    Conj cs ->
+      let cs' = filter (/= T) $ map simplify cs
+      in if F `elem` cs'
+        then F
+        else case cs' of
+          [] -> T
+          [c] -> c
+          cs -> Conj cs
+    Disj cs ->
+      let cs' = filter (/= F) $ map simplify cs
+      in if T `elem` cs'
+        then T
+        else case cs' of
+          [] -> T
+          [c] -> c
+          cs -> Disj cs
+    Not c ->
+      case simplify c of
+        Not c -> c
+        c -> Not c
+    If c1 c2 ->
+      case (simplify c1, simplify c2) of
+        (F,_) -> T
+        (T,c) -> c
+        (_,T) -> T
+        (c1,c2) -> If c1 c2
+    x -> x
 
-{-|
->>> simplifyDeep $ Disj [Conj [Disj [Conj [Disj [], Disj [F]]], Disj []], Disj [Depends "A" "B", Depends "A" "C"]]
-Disj [Depends "A" "B",Depends "A" "C"]
--}
-simplifyDeep :: Eq a => Constraint a -> Constraint a
-simplifyDeep = flog simplify where flog f x = if f x == x then x else flog f (f x)
+-- {-|
+-- >>> simplifyDeep $ Disj [Conj [Disj [Conj [Disj [], Disj [F]]], Disj []], Disj [Depends "A" "B", Depends "A" "C"]]
+-- Disj [Depends "A" "B",Depends "A" "C"]
+-- -}
+-- simplifyDeep :: Eq a => Constraint a -> Constraint a
+-- simplifyDeep = flog simplify where flog f x = if f x == x then x else undefined -- flog f (f x)
 
-pkgs :: Constraint a -> [a] -- or Set a?
-pkgs = foldMap return
+usedIn :: Eq a => Constraint a -> [a]
+usedIn = nub . foldl' (flip (:)) []
+
+-- usedIn :: Ord a => Constraint a -> Set a
+-- usedIn = foldl' (flip Set.insert) Set.empty
 
 fold :: (b -> a -> b) -> b -> Constraint a -> b
 fold = foldl'
@@ -142,8 +147,7 @@ fold = foldl'
 >>> pkgs' $ Disj [Depends "A" "B", Depends "A" "C"]
 fromList ["A","B","C"]
 -}
-usedIn :: Ord a => Constraint a -> Set a
-usedIn = foldl' (flip Set.insert) Set.empty
+
 
 {-
 The target state is a conjunction of constraints, e.g.: ["+A","-B>2","+C=4"]:

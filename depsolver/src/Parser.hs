@@ -3,6 +3,7 @@
 {-# language FlexibleInstances #-}
 {-# language ScopedTypeVariables #-}
 {-# LANGUAGE ImplicitParams #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Parser
   ( decode
@@ -30,7 +31,7 @@ import qualified Data.Set as Set
 import Data.Vector (Vector)
 import qualified Data.Vector as V
 import System.FilePath ((</>))
-import Data.SBV
+import Data.List (intersperse)
 
 import qualified Data.ByteString.Lazy as B
 import Data.Foldable (foldl')
@@ -105,7 +106,7 @@ name = fst . pkgId
 version :: Pkg -> Version
 version = snd . pkgId
 
-parseInput :: FilePath -> IO (Map Name [Pkg],Set PkgId,Constraint PkgConstr)
+parseInput :: FilePath -> IO (Map Name [Pkg],[PkgId],Constraint PkgConstr)
 parseInput wd = do
   r <- repository wd
   i <- initial wd
@@ -126,11 +127,11 @@ constraints wd = do
   let Just cs = decode raw :: Maybe [Text]
   return . Conj $ map fromText cs
 
-initial :: FilePath -> IO (Set PkgId)
+initial :: FilePath -> IO ([] PkgId)
 initial wd = do
   raw <- B.readFile $ wd </> "initial.json"
   let Just cs = decode raw
-  return . Set.fromList . map fromText $ cs
+  return . map fromText $ cs
   -- return $ Set.fromList cs
   -- return cs
 
@@ -154,10 +155,11 @@ instance FromText Version where
   fromText str = map unwrap $ T.splitOn "." str where unwrap x = case decimal x of Right (n,_) -> n
 
 instance FromText PkgId where
-  fromText inp = case T.span (\c -> isAlphaNum c || (c == '-') || (c == '.') || (c == '+')) inp of
-    (name,rest) -> case T.uncons rest of
-      Just ('=',vers) -> (name,fromText vers)
-      Nothing -> error "unexpected package id format."
+  fromText inp = case T.span pat .  T.filter (/= '|') $ inp of
+      (name,rest) -> case T.uncons rest of
+        Just ('=',vers) -> (name,fromText vers)
+        Nothing -> error "unexpected package id format."
+    where pat c = isAlphaNum c || (c == '-') || (c == '.') || (c == '+')
 
 instance FromText PkgConstr where
   fromText inp = case T.span (\c -> isAlphaNum c || (c == '-') || (c == '.') || (c == '+')) inp of
@@ -179,6 +181,44 @@ instance FromText (Constraint PkgConstr) where
     Just ('-', rest) -> Not $ Installed (fromText rest)
     _ -> error $ show inp
 
+
+type Output = Text
+
+class Eq a => ToSmtLib a where
+  toSmtLib :: a -> Output
+
+instance ToSmtLib a => ToSmtLib (Constraint a) where
+  toSmtLib = toSmtLib' . simplify
+    where
+      toSmtLib' = \case
+        F -> "false"
+        T -> "true"
+        Installed x -> "(> " <> toSmtLib x <> " 0)"
+        Depends x y -> "(< " <> toSmtLib x <> " " <> toSmtLib y <> ")"
+        DependsInit x y -> "(<= " <> toSmtLib x <> " " <> toSmtLib y <> ")"
+        Conflicts x y -> "(> (- " <> toSmtLib x <> ") " <> toSmtLib y <> ")"
+        If c1 c2 -> "(=> " <> toSmtLib c1 <> " " <> toSmtLib c2 <> ")"
+        -- Depends x y -> "((=> (> " <> toSmtLib x <> " 0) (<" <> toSmtLib x <> " " <> toSmtLib y <> "))"
+        -- Conflicts x y -> "((=> (> " <> toSmtLib x <> " 0) (> (- " <> toSmtLib x <> ") " <> toSmtLib y <> "))"
+        Conj cs -> "(and " <> (mconcat . intersperse " " . map toSmtLib) cs <> ")"
+        Disj cs -> mconcat ["(or ",(mconcat . intersperse " " . map toSmtLib) cs,")"]
+        Not x -> mconcat ["(not ",toSmtLib x,")"]
+
+instance ToSmtLib SmtLibStmt where
+  toSmtLib (Assert c) = "(assert " <> toSmtLib c <> ")"
+  toSmtLib (DeclareVar v) = "(declare-const " <> toSmtLib v <> " Int)"
+  toSmtLib (Objective cs) = "(minimize (+ " <> (mconcat . intersperse " " . map toSmtLib) cs <> "))"
+  toSmtLib Submit = "(check-sat)\n(get-model)\n(get-objectives)\n(exit)"
+
+instance ToSmtLib (Pkg,Integer,Integer) where
+  toSmtLib (p,install,uninstall) =
+      "(ite (< 0 " <> toSmtLib p <> ") " <> T.pack (show install) <> " " <> T.pack (show uninstall) <> ")"
+
+data SmtLibStmt
+  = Assert (Constraint Pkg)
+  | DeclareVar Pkg
+  | Objective [(Pkg,Integer,Integer)]
+  | Submit deriving (Eq, Show)
 
 
 -- mkConditionalConstraint :: a -> Constraint a -> Constraint a -> Constraint a

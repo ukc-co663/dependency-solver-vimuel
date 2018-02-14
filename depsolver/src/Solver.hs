@@ -7,8 +7,7 @@
 module Solver where
 
 import Data.Monoid
-import Control.Monad.IO.Class
-import Data.Traversable (for, forM)
+import Data.Traversable (for)
 import Data.Ord (comparing)
 import qualified Data.Foldable as Foldable (foldl', length)
 import Data.List (sortBy, reverse)
@@ -18,8 +17,6 @@ import Data.Maybe (catMaybes, mapMaybe, isNothing, fromJust)
 import Data.Map.Lazy (Map, (!))
 import qualified Data.Map.Lazy as Map
 import Control.Monad (unless, forM, forM_, when)
-import Data.SBV
-import qualified Data.SBV.Internals as SBV
 import Data.IORef
 import System.FilePath ((</>))
 import System.Process
@@ -28,130 +25,145 @@ import Data.Ord (comparing)
 import System.IO
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
-
-import Debug.Trace
+import Data.Text.Read (decimal, signed)
+import Data.Ord (Down(..))
+import Data.Time.Clock (getCurrentTime, diffUTCTime)
 
 import Constraints
 import Parser
 
--- Conj [Installed "A", Not (Installed "B")]
+get :: Map Name [Pkg] -> PkgConstr -> [Pkg]
+get repo (PkgConstr name versionConstr) =
+  case Map.lookup name repo of
+    Nothing -> []
+    Just pkgs -> throwOut $ pkgs
+  where
+    throwOut = case versionConstr of
+        Nothing -> id
+        Just (r,v) -> filter $ \p -> toOperator r (version p) v
 
--- compilePkgConstr :: Map Name [Pkg] -> Constraint PkgConstr -> Constraint Pkg
--- compilePkgConstr repo constr =
---   case constr of
---     Installed (PkgConstr name versionConstr) ->
---       case Map.lookup name repo of
---         Nothing -> F
---         Just
---     Conj cs -> Conj . map (compilePkgConstr repo) $ cs
---     Disj cs -> Disj . map (compilePkgConstr repo) $ cs
---     Not c -> Not . compilePkgConstr repo $ c
---     T -> T
---     _ -> F
-{--
-```Depends (Any "A") (Any "B")```
-where `Any "A"` is some key, that maps to, say, `Disj ["A1", "A2"]`. So I `fmap`my lookup function and get:
-```Depends (Disj ["A1", "A2"]) (Disj ["B1","B2"])
-```
-Then, I want my `join` to give me the disjunction of the cartesian product of the dependencies
-```Disj [Depends "A1" "B1",Depends "A1" "B2",Depends "A2" "B1",Depends "A2" "B2"]```
+mkDepConfConstrs repo pkg = If (Installed pkg) (Conj [deps,confs])
+  where
+    deps = Conj . map (Disj . map (Disj . (F :) . map (Depends pkg) . get repo)) . depends $ pkg
+    confs = Conj . map (Conj . (T :) . map (Conflicts pkg) . get repo) . conflicts $ pkg
 
-Depends (Conj ["
---}
+mkInitDepConfConstrs :: Map Name [Pkg] -> Pkg -> Constraint Pkg
+mkInitDepConfConstrs repo pkg = If (Installed pkg) (Conj [deps,confs])
+  where
+    deps = Conj . map (Disj . map (Disj . (F :) . map (DependsInit pkg) . get repo)) . depends $ pkg
+    confs = Conj . map (Conj . (T :) . map (Conflicts pkg) . get repo) . conflicts $ pkg
 
-class Compile a where
-  compile :: Map Name [Pkg] -> a -> Constraint Pkg
+process :: Map Name [Pkg] -> [Pkg] -> Set Pkg -> [Constraint Pkg] -> [Constraint Pkg]
+process repo toProcess alreadyProcessed constrs =
+  case toProcess of
+    [] -> constrs
+    (p:toProcess) ->
+      if Set.member p alreadyProcessed
+        then process repo toProcess alreadyProcessed constrs
+        else
+          let c = mkDepConfConstrs repo p
+          in process repo (depsConfls repo p ++ toProcess) (Set.insert p alreadyProcessed) (c:constrs)
 
-instance Compile (Constraint PkgConstr) where
-  compile repo = join . fmap (compile repo)
-
-instance Compile PkgConstr where
-  compile repo (PkgConstr name versionConstr) =
-    case Map.lookup name repo of
-      Nothing -> F
-      Just pkgs -> Disj . map Installed . throwOut $ pkgs
-    where
-      throwOut = case versionConstr of
-          Nothing -> id
-          Just (r,v) -> filter $ \p -> toOperator r v (version p)
-
-instance Compile Pkg where
-  compile repo pkg = If (Installed pkg) (Conj [deps pkg,confs pkg])
-    where
-      deps = Conj . map (Disj . map compileDs) . depends
-      confs = Conj . map compileCs . conflicts
-
-      compileDs (PkgConstr name versionConstr) =
-        case Map.lookup name repo of
-          Nothing -> F
-          Just pkgs -> Disj . map (Depends pkg) . throwOut $ pkgs
-        where
-          throwOut = case versionConstr of
-              Nothing -> id
-              Just (r,v) -> filter $ \p -> toOperator r v (version p)
-
-      compileCs (PkgConstr name versionConstr) =
-        case Map.lookup name repo of
-          Nothing -> F
-          Just pkgs -> Disj . map (Conflicts pkg) . throwOut $ pkgs
-        where
-          throwOut = case versionConstr of
-              Nothing -> id
-              Just (r,v) -> filter $ \p -> toOperator r v (version p)
-
-
-instance ToSmtLib SmtLibStmt where
-  toSmtLib (Assert c) = "(assert " <> toSmtLib (simplifyDeep c) <> ")"
-  toSmtLib (DeclareVar v) = "(declare-const " <> toSmtLib v <> " Int)"
-  toSmtLib Submit = "(check-sat)\n(get-model)\n(exit)"
-
-data SmtLibStmt
-  = Assert (Constraint Pkg)
-  | DeclareVar Pkg
-  | Submit
+depsConfls repo pkg = concatMap (get repo) $ concat (depends pkg) ++ conflicts pkg
 
 go path = do
-    (Just hZ3In, _, _, z3) <- -- Just hZ3Out, Just hZ3Err, z3) <-
-      -- createProcess (proc "z3" ["-smt2","-in"])
-      createProcess (shell "time z3 -smt2 -in")
+    (Just hZ3In, Just hZ3Out, _, z3) <- -- Just hZ3Out, Just hZ3Err, z3) <-
+      createProcess (proc "z3" ["-smt2","-in"])
+      -- createProcess (shell "time z3 -smt2 -in")
         { std_in  = CreatePipe
-        , std_out = Inherit
+        , std_out = CreatePipe
         , std_err = Inherit }
 
+    (repo, initial, target) <- parseInput path
+
+    let initialPkgs = map (\(name,vers) -> head . filter (\p -> version p == vers) $ repo ! name) initial
+
+    initial' <- return . map (mkInitDepConfConstrs repo) $ initialPkgs
+    target <- return . fmap (head . get repo) $ target
+    let constrs = process repo (concat (usedIn (fmap (depsConfls repo) target)) ++ usedIn target) (Set.fromList (concatMap usedIn initial')) []
+
+
+    res <- callSMT True hZ3In hZ3Out (Set.fromList initialPkgs) (target:initial'++constrs)
+
+    let initialSet = Set.fromList initial
+        pretty acc [] = acc
+        pretty acc ((pkg,n):pkgs) =
+            if Set.member (fromText pkg) initialSet
+              then if n<1 then pretty (("-"<>pkg):acc) pkgs else pretty acc pkgs
+              else if n<1 then pretty acc pkgs else pretty (("+"<>pkg):acc) pkgs
+
+    writeFile (path </> "commands.json") (show . reverse . (pretty []) $ res)
+    callProcess "python" $ ["tests/judge.py"]
+                      ++ map (path </>)
+                          [ "repository.json"
+                          , "initial.json"
+                          , "commands.json"
+                          , "constraints.json" ]
+
+    -- putStrLn . unlines $ "Satisfiable:" : out
+
+    -- let targetConstraints = compile repo Installed $ target
+    --     pkgs = usedIn targetConstraints
+    --
+    --     -- TODO: Now, for each package, compile its constraints.
+    --
+    -- mapM_ (toZ3 . DeclareVar) (concatMap snd . Map.toList $ repo)
+    -- toZ3 $ Assert targetConstraints
+    -- mapM_ (toZ3 . Assert . compile repo) pkgs
+    -- toZ3 Submit
+    -- ready <- hWaitForInput hZ3Err (5 * 1000)
+    -- when ready $ putStrLn =<< hGetLine hZ3Err
+    -- terminateProcess z3
+    return ()
+
+
+
+
+callSMT :: Bool -> Handle -> Handle -> Set Pkg -> [Constraint Pkg] -> IO [(Text.Text, Int)]
+callSMT logging hIn hOut initial constrs = do
+
+    putStrLn "Calculating constraints and submitting to Z3..."
+    t1 <- getCurrentTime
     counter <- newIORef (1 :: Int)
-    let logging = True
+
     let toZ3 constraint = do
           let constr = toSmtLib constraint
           when logging $ do
             i <- readIORef counter
             Text.appendFile "log.txt" $ constr <> " ; " <> Text.pack (show i) <> "\n"
             modifyIORef' counter succ
-          Text.hPutStrLn hZ3In constr
+          Text.hPutStrLn hIn constr
 
+        variables :: [Pkg] = usedIn . Conj $ constrs
+        costs = map (\p -> if Set.member p initial then (p,0,1000000) else (p,size p,0)) variables
 
-    (repo, initial, target) <- parseInput path
-
-
-    let targetConstraints = compile repo $ target
-        pkgs = usedIn targetConstraints
-
-        -- TODO: Now, for each package, compile its constraints.
-
-    mapM_ (toZ3 . DeclareVar) (concatMap snd . Map.toList $ repo)
-    toZ3 $ Assert targetConstraints
-    mapM_ (toZ3 . Assert . compile repo) pkgs
+    mapM_ (toZ3 . DeclareVar) $ variables
+    -- when (length variables < 2000) (toZ3 $ Objective costs)
+    mapM_ (toZ3 . Assert) constrs
     toZ3 Submit
+    t2 <- getCurrentTime
+    putStr "Constraints submitted to Z3 in "
+    putStrLn . show $ diffUTCTime t2 t1
 
+    hClose hIn
 
+    t1 <- getCurrentTime
+    model <- Text.hGetContents hOut
+    t2 <- getCurrentTime
+    putStrLn $ "Z3 finished in " <> (show $ diffUTCTime t2 t1)
+    Text.appendFile "log.txt" model
+    -- Text.putStrLn model
 
-    -- ready <- hWaitForInput hZ3Err (5 * 1000)
-    -- when ready $ putStrLn =<< hGetLine hZ3Err
+    return $ reverse $ (sortBy (comparing (abs . snd)) $ foo [] (Text.lines model))
 
+foo acc [] = acc
+foo acc (x:xs) = case Text.stripPrefix "(define-fun " . Text.stripStart $ x of
+  Nothing -> foo acc xs
+  Just rest ->
+    let Right (n,_) = signed decimal . Text.filter (/= '(') . Text.filter (/= ' ') . head $ xs
+        pkgId = Text.takeWhile (/= ' ') . Text.filter (/= '|') $ rest
+    in foo ((pkgId,n):acc) (tail xs)
 
-    hClose hZ3In
-    putStrLn "Finished."
-    -- terminateProcess z3
-    return ()
 
 
 -- getConstraints :: (?store :: IORef (Map (name,version) Text)) Name -> Version -> Text

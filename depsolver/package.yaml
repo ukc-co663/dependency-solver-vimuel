@@ -28,7 +28,6 @@ library:
   - -O2
   - +RTS -H512m -K512m -RTS
   dependencies:
-  - sbv
   - text
   - aeson
   - bytestring
@@ -36,12 +35,16 @@ library:
   - vector
   - containers
   - filepath
-  - transformers
   - process
+  - catamorphism
+  - time
 
 executables:
   depsolver-exe:
     main:                Main.hs
+    ghc-options:
+    - -O2
+    - +RTS -H512m -K512m -RTS
     source-dirs:         app
     ghc-options:
     - -threaded
