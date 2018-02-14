@@ -195,7 +195,7 @@ instance ToSmtLib a => ToSmtLib (Constraint a) where
         T -> "true"
         Installed x -> "(> " <> toSmtLib x <> " 0)"
         Depends x y -> "(< " <> toSmtLib x <> " " <> toSmtLib y <> ")"
-        DependsInit x y -> "(<= " <> toSmtLib x <> " " <> toSmtLib y <> ")"
+        DependsInit x y -> "(or (< " <> toSmtLib x <> " " <> toSmtLib y <> ") (and (= " <> toSmtLib x <> " " <> toSmtLib y <> ") (> " <> toSmtLib x <> " 0)"
         Conflicts x y -> "(> (- " <> toSmtLib x <> ") " <> toSmtLib y <> ")"
         If c1 c2 -> "(=> " <> toSmtLib c1 <> " " <> toSmtLib c2 <> ")"
         -- Depends x y -> "((=> (> " <> toSmtLib x <> " 0) (<" <> toSmtLib x <> " " <> toSmtLib y <> "))"
