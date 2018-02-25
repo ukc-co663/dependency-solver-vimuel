@@ -86,56 +86,14 @@ go path = do
 
     initial' <- return . map (mkInitDepConfConstrs repo) $ initialPkgs
 
-    let go2 _ [] = error "unsat"
-        go2 ts' (t:ts) = do
-          target' <- return . fmap (head . get repo) $ t
-          let constrs = process repo (concat (usedIn (fmap (depsConfls repo) target')) ++ usedIn target') (Set.fromList (concatMap usedIn initial')) []
-          res <-
-            let (logging,hIn,hOut,initial,constrs) = (True,hZ3In,hZ3Out,(Set.fromList initialPkgs),(target':initial'++constrs))
-            in do
 
-                putStrLn "Calculating constraints and submitting to Z3..."
-                t1 <- getCurrentTime
-                counter <- newIORef (1 :: Int)
+    target' <- return . fmap (head . get repo) $ target
+    let constrs = process repo (concat (usedIn (fmap (depsConfls repo) target')) ++ usedIn target') (Set.fromList (concatMap usedIn initial')) []
+    res <- callSMT True hZ3In hZ3Out (Set.fromList initialPkgs) (target':initial'++constrs)
+    case res of
+      [] -> error "Failed to satisfy all constraints, retrying on a smaller set of constraints."
+      res -> return res
 
-                let toZ3 constraint = do
-                      let constr = toSmtLib constraint
-                      when logging $ do
-                        i <- readIORef counter
-                        Text.appendFile "log.txt" $ constr <> " ; " <> Text.pack (show i) <> "\n"
-                        modifyIORef' counter succ
-                      Text.hPutStrLn hIn constr
-
-                    variables :: [Pkg] = usedIn . Conj $ constrs
-                    costs = map (\p -> if Set.member p initial then (p,0,1000000) else (p,size p,0)) variables
-
-                mapM_ (toZ3 . DeclareVar) $ variables
-                -- when (length variables < 2000) (toZ3 $ Objective costs)
-                mapM_ (toZ3 . Assert) constrs
-                toZ3 Submit
-                t2 <- getCurrentTime
-                putStr "Constraints submitted to Z3 in "
-                putStrLn . show $ diffUTCTime t2 t1
-
-
-                t1 <- getCurrentTime
-                model <- Text.hGetContents hOut
-                t2 <- getCurrentTime
-                putStrLn $ "Z3 finished in " <> (show $ diffUTCTime t2 t1)
-                Text.appendFile "log.txt" model
-                -- Text.putStrLn model
-
-                return $ reverse $ (sortBy (comparing (abs . snd)) $ foo [] (Text.lines model))
-
-          case res of
-            [] -> do
-              putStrLn "Failed to satisfy all constraints, retrying on a smaller set of constraints."
-              go2 (t:ts') ts
-            res -> case ts' of
-              [] -> return res
-              ts' -> error $ "got stuck" ++ show ts' ++ "\n\n" ++ show res
-
-    res <- go2 [] (subconstrs target)
 
     let initialSet = Set.fromList initial
         pretty acc [] = acc
