@@ -16,7 +16,7 @@ import Control.Monad (forM_)
 import Control.Monad.IO.Class (liftIO)
 
 import Data.Aeson
-import Data.List (sortBy)
+import Data.List (sortBy, partition)
 import Data.Ord (comparing)
 import Data.Maybe (fromJust)
 import Data.Char (isAlphaNum, isDigit)
@@ -106,12 +106,12 @@ name = fst . pkgId
 version :: Pkg -> Version
 version = snd . pkgId
 
-parseInput :: FilePath -> IO (Map Name [Pkg],[PkgId],Constraint PkgConstr)
+parseInput :: FilePath -> IO (Map Name [Pkg],[PkgId],Constraint Pkg)
 parseInput wd = do
   r <- repository wd
   i <- initial wd
   c <- constraints wd
-  return (r,i,c)
+  return (r,i, Installed c)
 
 repository :: FilePath -> IO (Map Name [Pkg])
 repository wd = do
@@ -121,11 +121,21 @@ repository wd = do
       mkRepo = Map.fromListWith (++) . map (\(n,m) -> (n,[m]))
   return . mkRepo . parseRepo $ raw
 
-constraints :: FilePath -> IO (Constraint PkgConstr)
+-- constraints :: FilePath -> IO Pkg
 constraints wd = do
   raw <- B.readFile $ wd </> "constraints.json"
-  let Just cs = decode raw :: Maybe [Text]
-  return . Conj $ map fromText cs
+  let Just target = decode raw :: Maybe [Text]
+      (ds,cs) = partition (\c -> case T.uncons c of Just ('+', _) -> True; Just ('-', _) -> False) target
+      deps = map (return . fromText . T.tail) ds
+      conf = map (fromText . T.tail) cs
+  return Pkg { pkgId = ("_VIRTUAL_",[]), size = 0, depends = deps, conflicts = conf }
+
+-- data Pkg = Pkg
+--   { pkgId :: (Name, Version)
+--   , size :: Integer
+--   , depends :: [[PkgConstr]]  -- [[PkgConstr]]
+--   , conflicts :: [PkgConstr]  -- [PkgConstr]
+--   } deriving Show
 
 initial :: FilePath -> IO ([] PkgId)
 initial wd = do
@@ -175,11 +185,11 @@ instance FromText Relation where
     ">=" -> GtEq
     ">" -> Gt
 
-instance FromText (Constraint PkgConstr) where
-  fromText inp = case T.uncons inp of
-    Just ('+', rest) -> Installed (fromText rest)
-    Just ('-', rest) -> Not $ Installed (fromText rest)
-    _ -> error $ show inp
+-- instance FromText (Constraint PkgConstr) where
+--   fromText inp = case T.uncons inp of
+--     Just ('+', rest) -> Installed (fromText rest)
+--     Just ('-', rest) -> Not $ Installed (fromText rest)
+--     _ -> error $ show inp
 
 
 type Output = Text
@@ -187,16 +197,31 @@ type Output = Text
 class Eq a => ToSmtLib a where
   toSmtLib :: a -> Output
 
+-- instance ToSmtLib a => ToSmtLib (Constraint a) where
+--   toSmtLib = toSmtLib' . simplify
+--     where
+--       toSmtLib' = \case
+--         F -> "false"
+--         T -> "true"
+--         Installed x -> "(> " <> toSmtLib x <> " 0)"
+--         Depends x y -> "(< " <> toSmtLib x <> " " <> toSmtLib y <> ")"
+--         DependsInit x y -> "(or (< " <> toSmtLib x <> " " <> toSmtLib y <> ") (and (= " <> toSmtLib x <> " " <> toSmtLib y <> ") (> " <> toSmtLib x <> " 0)"
+--         Conflicts x y -> "(> (- " <> toSmtLib x <> ") " <> toSmtLib y <> ")"
+--         If c1 c2 -> "(=> " <> toSmtLib c1 <> " " <> toSmtLib c2 <> ")"
+--         -- Depends x y -> "((=> (> " <> toSmtLib x <> " 0) (<" <> toSmtLib x <> " " <> toSmtLib y <> "))"
+--         -- Conflicts x y -> "((=> (> " <> toSmtLib x <> " 0) (> (- " <> toSmtLib x <> ") " <> toSmtLib y <> "))"
+--         Conj cs -> "(and " <> (mconcat . intersperse " " . map toSmtLib) cs <> ")"
+--         Disj cs -> mconcat ["(or ",(mconcat . intersperse " " . map toSmtLib) cs,")"]
+--         Not x -> mconcat ["(not ",toSmtLib x,")"]
 instance ToSmtLib a => ToSmtLib (Constraint a) where
   toSmtLib = toSmtLib' . simplify
     where
       toSmtLib' = \case
         F -> "false"
         T -> "true"
-        Installed x -> "(> " <> toSmtLib x <> " 0)"
-        Depends x y -> "(< " <> toSmtLib x <> " " <> toSmtLib y <> ")"
-        DependsInit x y -> "(or (< " <> toSmtLib x <> " " <> toSmtLib y <> ") (and (= " <> toSmtLib x <> " " <> toSmtLib y <> ") (> " <> toSmtLib x <> " 0)"
-        Conflicts x y -> "(> (- " <> toSmtLib x <> ") " <> toSmtLib y <> ")"
+        Installed x -> "(= " <> toSmtLib x <> " true)"
+        Depends x y -> "(= " <> toSmtLib y <> " true)"
+        Conflicts x y -> "(= " <> toSmtLib y <> " false)"
         If c1 c2 -> "(=> " <> toSmtLib c1 <> " " <> toSmtLib c2 <> ")"
         -- Depends x y -> "((=> (> " <> toSmtLib x <> " 0) (<" <> toSmtLib x <> " " <> toSmtLib y <> "))"
         -- Conflicts x y -> "((=> (> " <> toSmtLib x <> " 0) (> (- " <> toSmtLib x <> ") " <> toSmtLib y <> "))"
@@ -206,13 +231,14 @@ instance ToSmtLib a => ToSmtLib (Constraint a) where
 
 instance ToSmtLib SmtLibStmt where
   toSmtLib (Assert c) = "(assert " <> toSmtLib c <> ")"
-  toSmtLib (DeclareVar v) = "(declare-const " <> toSmtLib v <> " Int)"
+  toSmtLib (DeclareVar v) = "(declare-const " <> toSmtLib v <> " Bool)"
   toSmtLib (Objective cs) = "(minimize (+ " <> (mconcat . intersperse " " . map toSmtLib) cs <> "))"
-  toSmtLib Submit = "(check-sat)\n(get-model)\n(get-objectives)\n(exit)"
+  -- toSmtLib Submit = "(check-sat)\n(get-model)\n(get-objectives)\n(exit)"
+  toSmtLib Submit = "(check-sat)\n(get-model)\n(exit)"
 
 instance ToSmtLib (Pkg,Integer,Integer) where
   toSmtLib (p,install,uninstall) =
-      "(ite (< 0 " <> toSmtLib p <> ") " <> T.pack (show install) <> " " <> T.pack (show uninstall) <> ")"
+      "(ite " <> toSmtLib p <> " " <> T.pack (show install) <> " " <> T.pack (show uninstall) <> ")"
 
 data SmtLibStmt
   = Assert (Constraint Pkg)

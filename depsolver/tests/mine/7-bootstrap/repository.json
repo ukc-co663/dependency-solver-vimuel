@@ -1,0 +1,19 @@
+[ {"name" : "A"
+, "version" : "1"
+, "size" : 1}
+, {"name" : "B"
+    , "depends" : [["A"]]
+    , "conflicts" : ["E"]
+    , "version" : "1"
+    , "size" : 1
+  }
+, {"name" : "C"
+  ,"depends" : [["B", "D"]]
+, "version" : "1", "size" : 1}
+, {"name" : "D"
+  , "depends" : [["C"]]
+, "version" : "1", "size" : 1}
+,{"name" : "E"
+  , "depends" : [["C", "D"]]
+, "version" : "1", "size" : 1}
+]
