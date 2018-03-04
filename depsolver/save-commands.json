@@ -1,0 +1,5 @@
+{
+  "commands":
+  [ "**/*.smt2 : z3 -smt2 {relFullPath}"
+  ]
+}

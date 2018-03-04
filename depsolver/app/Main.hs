@@ -1,12 +1,15 @@
+{-# LANGUAGE ImplicitParams #-}
 module Main where
 
 import qualified Data.ByteString.Lazy as B (readFile)
 import System.Environment (getArgs)
 
-import Solver
+import Solve
 -- import SolverUnsat
 
 main :: IO ()
 main = do
-  (path:_) <- getArgs
-  go path
+  (path:flags) <- getArgs
+  let ?logging = "-l" `elem` flags
+      ?debugging = "-d" `elem` flags
+  doStuff path

@@ -25,7 +25,7 @@ dependencies:
 library:
   source-dirs: src
   ghc-options:
-  - -O2
+  - -O
   - +RTS -H512m -K512m -RTS
   dependencies:
   - text
@@ -36,7 +36,6 @@ library:
   - containers
   - filepath
   - process
-  - catamorphism
   - time
 
 executables:

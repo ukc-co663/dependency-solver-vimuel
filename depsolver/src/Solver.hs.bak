@@ -47,12 +47,7 @@ mkDepConfConstrs repo pkg = If (Installed pkg) (Conj [deps,confs])
     deps = Conj . map (Disj . map (Disj . (F :) . map (Depends pkg) . get repo)) . depends $ pkg
     confs = Conj . map (Conj . (T :) . map (Conflicts pkg) . get repo) . conflicts $ pkg
 
--- mkInitDepConfConstrs :: Map Name [Pkg] -> Pkg -> Constraint Pkg
--- mkInitDepConfConstrs repo pkg = If (Installed pkg) (Conj [deps,confs])
---   where
---     deps = Conj . map (Disj . map (Disj . (F :) . map (DependsInit pkg) . get repo)) . depends $ pkg
---     confs = Conj . map (Conj . (T :) . map (Conflicts pkg) . get repo) . conflicts $ pkg
-
+-- incredibly wasteful way to calculate this, but my time is more precious than CPU cycles
 process :: Map Name [Pkg] -> [Pkg] -> Set Pkg -> [Constraint Pkg] -> [Constraint Pkg]
 process repo toProcess alreadyProcessed constrs =
   case toProcess of
@@ -81,7 +76,7 @@ go path = do
         initial' = map (mkDepConfConstrs repo) initialPkgs
         constrs = process repo (usedIn target) (Set.fromList (concatMap usedIn initial')) []
     res <- callSMT True hZ3In hZ3Out (Set.fromList initialPkgs) (target:initial'++constrs)
-    print res
+    return res
 
 
     -- writeFile (path </> "commands.json") (show res)
@@ -92,7 +87,6 @@ go path = do
     --                       , "commands.json"
     --                       , "constraints.json" ]
 
-    return ()
 
 callSMT :: Bool -> Handle -> Handle -> Set Pkg -> [Constraint Pkg] -> IO [(Text.Text, Bool)]
 callSMT logging hIn hOut initial constrs = do
@@ -113,7 +107,6 @@ callSMT logging hIn hOut initial constrs = do
         costs = map (\p -> if Set.member p initial then (p,0,1000000) else (p,size p,0)) variables
 
     mapM_ (toZ3 . DeclareVar) $ variables
-    -- when (length variables < 2000) (toZ3 $ Objective costs)
     toZ3 $ Objective costs
     mapM_ (toZ3 . Assert) constrs
     toZ3 Submit
@@ -121,21 +114,17 @@ callSMT logging hIn hOut initial constrs = do
     putStr "Constraints submitted to Z3 in "
     putStrLn . show $ diffUTCTime t2 t1
 
-
     t1 <- getCurrentTime
     model <- Text.hGetContents hOut
     t2 <- getCurrentTime
     putStrLn $ "Z3 finished in " <> (show $ diffUTCTime t2 t1)
-    if logging then Text.appendFile "log-out.txt" model
-      else Text.putStrLn model
-    -- Text.putStrLn model
-
-    return $ foo [] (Text.lines model)
-
-foo acc [] = acc
-foo acc (x:xs) = case Text.stripPrefix "(define-fun " . Text.stripStart $ x of
-  Nothing -> foo acc xs
-  Just rest ->
-    let b = Text.isInfixOf "true" . head $ xs
-        pkgId = Text.takeWhile (/= ' ') . Text.filter (/= '|') $ rest
-    in foo ((pkgId,b):acc) (tail xs)
+    when logging $ Text.appendFile "log-out.txt" model
+    return $ parse [] (Text.lines model)
+  where
+    parse acc [] = acc
+    parse acc (x:xs) = case Text.stripPrefix "(define-fun " . Text.stripStart $ x of
+      Nothing -> parse acc xs
+      Just rest ->
+        let b = Text.isInfixOf "true" . head $ xs
+            pkgId = Text.takeWhile (/= ' ') . Text.filter (/= '|') $ rest
+        in parse ((pkgId,b):acc) (tail xs)
