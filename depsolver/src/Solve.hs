@@ -42,9 +42,17 @@ smt_notInInitial p = "(assert (not (installed " <> var p <> " 0)))"
 smt_depends p ps   = "(assert (depends " <> var p <> " " <> listOf ps <> "))"
 smt_conflicts p p' = "(assert (conflicts " <> var p <> " " <> var p' <> "))"
 
-dependenciesAndConflicts :: Map Name [Pkg] -> Pkg -> [SmtCmd]
-dependenciesAndConflicts repo p = (map (smt_conflicts p) $ concatMap (get repo) $ conflicts p)
-                                  ++ (map (smt_depends p . concatMap (get repo)) . depends $ p)
+-- dependenciesAndConflicts :: Map Name [Pkg] -> Pkg -> [SmtCmd]
+-- dependenciesAndConflicts repo p =
+--   (map (smt_conflicts p) $ concatMap (get repo) $ confls p)
+--                                   ++ (map (smt_depends p . concatMap (get repo)) . depends $ p)
+
+dependencies :: (?repo :: Map Name [Pkg]) => Pkg -> [[Pkg]]
+dependencies = map (concatMap (get ?repo)) . depends
+
+conflicts :: (?repo :: Map Name [Pkg]) => Pkg -> [Pkg]
+conflicts = concatMap (get ?repo) . confls
+
 
 get :: Map Name [Pkg] -> PkgConstr -> [Pkg]
 get repo (PkgConstr name versionConstr) =
@@ -55,18 +63,6 @@ get repo (PkgConstr name versionConstr) =
     throwOut = case versionConstr of
         Nothing -> id
         Just (r,v) -> filter $ \p -> toOperator r (version p) v
-
--- -- incredibly wasteful way to calculate this, but my time is more precious than CPU cycles
--- process :: Map Name [Pkg] -> [Pkg] -> Set Pkg -> [Pkg] -> [Pkg]
--- process repo toProcess alreadyProcessed constrs =
---   case toProcess of
---     [] -> constrs
---     (p:toProcess) ->
---       if Set.member p alreadyProcessed
---         then process repo toProcess alreadyProcessed constrs
---         else
---           let c = mkDepConfConstrs repo p
---           in process repo (depsConfls repo p ++ toProcess) (Set.insert p alreadyProcessed) (c:constrs)
 
 doStuff path = do
     t1 <- getCurrentTime
@@ -79,57 +75,93 @@ doStuff path = do
     hSetBuffering hZ3In NoBuffering
     hSetBuffering hZ3Out NoBuffering
     hSetBuffering stdin NoBuffering
+    hSetBuffering stdout NoBuffering
     counter <- newIORef (1 :: Int)
     (repo, initial, target) <- parseInput path
 
-    let repoMap = Map.fromListWith (++) . map (\(n,m) -> (n,[m])) $ repo
-        toZ3 = writeToPipe hZ3In counter path
+    let toZ3 = writeToPipe hZ3In counter path
         fromZ3 = do
           out <- Text.hGetLine hZ3Out
           when ?debugging $ Text.putStrLn out
           return out
-        allPkgs = target : map snd repo
+        process :: (?repo :: Map Name [Pkg]) => Set Pkg -> [Pkg] -> IO (Set Pkg)
+        process alreadyProcessed toProcess =
+            case toProcess of
+              [] -> return alreadyProcessed
+              (p:toProcess) ->
+                if p `Set.member` alreadyProcessed
+                  then process alreadyProcessed toProcess
+                  else do
+                    toZ3 $ smt_declareConst p
+                    if (pkgId p) `Set.member` initial
+                      then toZ3 $ smt_inInitial p
+                      else toZ3 $ smt_notInInitial p
+                    let dss = dependencies p
+                        cs = conflicts p
+                    ps <- process (Set.insert p alreadyProcessed) ((concat dss) ++ cs ++ toProcess)
+                    mapM_ toZ3 $ map (smt_depends p) dss
+                    mapM_ toZ3 $ map (smt_conflicts p) cs
+                    return ps
 
-    header <- Text.readFile "src/smt-header.smt2"
-    toZ3 header
+    putStr "Submitting constraints to Z3 ..."
+    toZ3 =<< Text.readFile "src/smt-header.smt2"
 
-    -- declare all the constants in the repo
-    -- define which ones are in the initial state and not
-    -- TODO only declare reachable ones
-    forM_ allPkgs $ \p -> do
-      toZ3 $ smt_declareConst p
-      if (pkgId p) `elem` initial
-        then toZ3 $ smt_inInitial p
-        else toZ3 $ smt_notInInitial p
-
-    forM_ allPkgs $ \p -> do
-      mapM_ toZ3 $ dependenciesAndConflicts repoMap p
+    let ?repo = Map.fromListWith (++) . map (\(n,m) -> (n,[m])) $ repo
+    allPkgs <- Set.toList <$> process Set.empty [target]
 
     toZ3 $ "(assert (installed " <> var target <> " t-final))"
+
+    t2 <- getCurrentTime
+    putStr "\rConstraints submitted to Z3 in "
+    putStrLn . show $ diffUTCTime t2 t1
 
     let
       hone :: Int -> Bool -> IO Int
       hone n stop = do
-          when (n > 100) $ error "failed"
+          when (n > 10000) $ error "failed"
+          putStr $ "Honing " ++ show n ++ "..."
           toZ3 "(push)"
+          t <- getCurrentTime
           toZ3 $ "(assert (= t-final " <> (Text.pack . show) n <> "))"
           toZ3 "(check-sat)"
+          res <- fromZ3
+          t' <- getCurrentTime
+          putStr $ "\rHoning " ++ show n ++ " took "
+          putStrLn . show $ diffUTCTime t' t
           toZ3 "(pop)"
-          fromZ3 >>= \case
+          case res of
             "sat" -> hone (n-1) True
             "unsat" -> if stop then return (n + 1) else if n == 0 then return 1 else hone (n*2) False
             x -> error $ show x
+      -- hone :: Int -> Int -> Int -> IO Int
+      -- hone comingFromBelow lower upper guess x =
+      --   if lower == 0 || upper == 1 then error ""
+      --     else case guess `compare` x of -- (assert ((>= t-final lower) (<= t-final upper))
+      --         EQ -> []
+      --         LT -> guess : if comingFromBelow then hone True (guess + 1) (upper * 2) (upper * 2) x
+      --                       else hone False (guess + 1) upper ((upper + guess + 1) `div` 2) x
+      --         GT -> guess : hone False lower (guess - 1) ((guess + lower - 1) `div` 2) x
 
-    t2 <- getCurrentTime
-    putStr "Constraints submitted to Z3 in "
-    putStrLn . show $ diffUTCTime t2 t1
 
-    t_final <- hone 1 False
-    when ?debugging $ print t_final
-    toZ3 $ "(assert (= t-final " <> (Text.pack . show) t_final <> "))"
+    let t_final_lb = (length . depends) target + (length . confls) target
+
+    -- t_final <- hone 1 False
+    -- when ?debugging $ print t_final
+    -- toZ3 $ "(assert (= t-final " <> (Text.pack . show) t_final <> "))"
     toZ3 "(check-sat)"
     "sat" <- fromZ3
-    matrix :: [(Pkg,[Text.Text])] <- forM allPkgs $ \p -> do
+    t3 <- getCurrentTime
+    putStr "Found solution in "
+    putStrLn . show $ diffUTCTime t3 t2
+
+    toZ3 "(eval t-final)"
+    t_final <- read . Text.unpack <$> fromZ3
+
+    -- toZ3 "(eval t-final)"
+    -- t_final <- read . Text.unpack <$> fromZ3
+    -- when ?debugging $ putStrLn $ "t-final: " ++ show t_final
+
+    matrix <- forM allPkgs $ \p -> do
       transitions <- forM [0..t_final] $ \t -> do
         toZ3 $ "(eval (installed " <> var p <> " " <> (Text.pack . show) t <> "))"
         fromZ3

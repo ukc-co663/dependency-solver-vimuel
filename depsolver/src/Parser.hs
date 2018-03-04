@@ -75,7 +75,7 @@ data Pkg = Pkg
   { pkgId :: (Name, Version)
   , size :: Integer
   , depends :: [[PkgConstr]]  -- [[PkgConstr]]
-  , conflicts :: [PkgConstr]  -- [PkgConstr]
+  , confls :: [PkgConstr]  -- [PkgConstr]
   } deriving Show
 
 instance Eq Pkg where
@@ -90,12 +90,12 @@ name = fst . pkgId
 version :: Pkg -> Version
 version = snd . pkgId
 
-parseInput :: FilePath -> IO ([(Name,Pkg)],[PkgId],Pkg)
+parseInput :: FilePath -> IO ([(Name,Pkg)],Set PkgId,Pkg)
 parseInput wd = do
   r <- repository wd
   i <- initial wd
   c <- constraints wd
-  return (r,i,c)
+  return (r,Set.fromList i,c)
 
 repository :: FilePath -> IO [(Name,Pkg)]
 repository wd = do
@@ -113,7 +113,7 @@ constraints wd = do
       (ds,cs) = partition (\c -> case T.uncons c of Just ('+', _) -> True; Just ('-', _) -> False) target
       deps = map (return . fromText . T.tail) ds
       conf = map (fromText . T.tail) cs
-  return Pkg { pkgId = ("_VIRTUAL_",[]), size = 0, depends = deps, conflicts = conf }
+  return Pkg { pkgId = ("_VIRTUAL_",[]), size = 0, depends = deps, confls = conf }
 
 initial :: FilePath -> IO ([PkgId])
 initial wd = do
@@ -127,8 +127,8 @@ instance {-# overlaps #-} FromJSON (Name, Pkg) where
     version <- fmap fromText $ obj .: "version"
     size <- obj .: "size"
     depends <- map (map (fromText)) <$> obj .:? "depends" .!= []
-    conflicts <- map (fromText) <$> obj .:? "conflicts" .!= []
-    return (name, Pkg (name,version) size depends conflicts)
+    confls <- map (fromText) <$> obj .:? "conflicts" .!= []
+    return (name, Pkg (name,version) size depends confls)
 
 class FromText a where
   fromText :: Text -> a
