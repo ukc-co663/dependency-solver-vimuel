@@ -96,7 +96,7 @@ doStuff r i c = do
                     mapM_ toZ3 $ map (smt_conflicts p) cs
                     return ps
 
-    putStr "Submitting constraints to Z3 ..."
+    -- putStr "Submitting constraints to Z3 ..."
     -- toZ3 =<< Text.readFile "src/smt-header.smt2"
     toZ3 "(set-option :produce-models true)\n\n;; SORTS\n(declare-sort Pkg 0)\n(define-sort Time () Int)\n\n;; CONSTANTS\n(declare-const t-final Time)\n\n;; FUNCTIONS\n(declare-fun installed (Pkg Time) Bool)\n\n;;;; At least one of ps is installed at t\n(define-fun-rec at-least-one-installed-of ((ps (List Pkg)) (t Time)) Bool\n  (ite (= nil ps) false (or (and (installed (head ps) t) (installed (head ps) (- t 1))) (at-least-one-installed-of (tail ps) t))))\n\n;;;; Package p depends on one of the packages in ps\n(define-fun depends ((p Pkg) (ps (List Pkg))) Bool\n(forall ((t Time)) (=> (installed p t)\n                       (and (at-least-one-installed-of ps t)\n                            (=> (> t 0) (at-least-one-installed-of ps (- t 1)))))))\n\n; (define-fun conflicts ((p1 Pkg) (p2 Pkg)) Bool\n; (forall ((t Time)) (not (and (installed p1 t) (or (installed p2 t))))))\n\n(define-fun conflicts ((p1 Pkg) (p2 Pkg)) Bool\n(forall ((t Time)) (and (=> (installed p1 t)\n                          (not (or (installed p2 (+ t 1)) (installed p2 t) (installed p2 (- t 1)))))\n                        (=> (installed p2 t)\n                          (not (or (installed p1 (+ t 1)) (installed p1 t) (installed p1 (- t 1))))))))\n\n;;;; Last state is always at time t > 0\n(assert (> t-final 0))\n\n;;;; Nothing is installed before t = 0\n(assert (forall ((t Time) (p Pkg)) (=> (< t 0) (not (installed p t)))))\n\n;; INVARIANTS\n;;;; Only one package may be (un)installed at a time\n(assert (forall ((t Time) (p Pkg) (q Pkg))\n                (=> (and (not (= (installed p t) (installed p (+ t 1))))\n                         (not (= (installed q t) (installed q (+ t 1)))))\n                    (= p q))))\n\n(declare-const cost Int)\n"
 
@@ -106,22 +106,22 @@ doStuff r i c = do
     mapM_ toZ3 $ map smt_notInFinal (conflicts target)
 
     t2 <- getCurrentTime
-    putStr "\rConstraints submitted to Z3 in "
-    putStrLn . show $ diffUTCTime t2 t1
-    putStrLn $ show (length allPkgs) ++ " packages in constraint."
+    -- putStr "\rConstraints submitted to Z3 in "
+    -- putStrLn . show $ diffUTCTime t2 t1
+    -- putStrLn $ show (length allPkgs) ++ " packages in constraint."
     let
       hone :: Int -> Bool -> IO Int
       hone n stop = do
           -- when (n > 1000000) $ error "failed"
-          putStr $ "Honing " ++ show n ++ "..."
+          -- putStr $ "Honing " ++ show n ++ "..."
           toZ3 "(push)"
           t <- getCurrentTime
           toZ3 $ "(assert (= t-final " <> (Text.pack . show) n <> "))"
           toZ3 "(check-sat)"
           res <- fromZ3
           t' <- getCurrentTime
-          putStr $ "\rHoning " ++ show n ++ " took "
-          putStrLn . show $ diffUTCTime t' t
+          -- putStr $ "\rHoning " ++ show n ++ " took "
+          -- putStrLn . show $ diffUTCTime t' t
           toZ3 "(pop)"
           case res of
             "sat" -> hone (n-1) True
@@ -143,14 +143,14 @@ doStuff r i c = do
     toZ3 "(check-sat)"
     "sat" <- fromZ3
     t3 <- getCurrentTime
-    putStr "Found solution in "
-    putStrLn . show $ diffUTCTime t3 t2
+    -- putStr "Found solution in "
+    -- putStrLn . show $ diffUTCTime t3 t2
 
 
 
     toZ3 "(eval t-final)"
     t_final <- read . Text.unpack <$> fromZ3
-    putStrLn $ "t-final: " ++ show t_final
+    -- putStrLn $ "t-final: " ++ show t_final
 
     matrix <- forM allPkgs $ \p -> do
       transitions <- forM [0..t_final] $ \t -> do
