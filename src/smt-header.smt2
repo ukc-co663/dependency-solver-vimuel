@@ -41,4 +41,5 @@
                 (=> (and (not (= (installed p t) (installed p (+ t 1))))
                          (not (= (installed q t) (installed q (+ t 1)))))
                     (= p q))))
-(minimize t-final)
+
+(declare-const cost Int)

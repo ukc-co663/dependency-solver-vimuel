@@ -39,7 +39,7 @@ library:
   - time
 
 executables:
-  depsolver-exe:
+  solve:
     main:                Main.hs
     ghc-options:
     - -O2

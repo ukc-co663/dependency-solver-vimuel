@@ -90,16 +90,16 @@ name = fst . pkgId
 version :: Pkg -> Version
 version = snd . pkgId
 
-parseInput :: FilePath -> IO ([(Name,Pkg)],Set PkgId,Pkg)
-parseInput wd = do
-  r <- repository wd
-  i <- initial wd
-  c <- constraints wd
+-- parseInput :: FilePath -> IO ([(Name,Pkg)],Set PkgId,Pkg)
+parseInput r i c = do
+  r <- repository r
+  i <- initial i
+  c <- constraints c
   return (r,Set.fromList i,c)
 
 repository :: FilePath -> IO [(Name,Pkg)]
-repository wd = do
-  raw <- B.readFile $ wd </> "repository.json"
+repository r = do
+  raw <- B.readFile r -- $ wd </> "repository.json"
   -- let parseRepo = V.toList . fromJust . decode
   --     mkRepo = Map.fromListWith (++) . map (\(n,m) -> (n,[m]))
   -- return . mkRepo . parseRepo $ raw
@@ -107,8 +107,8 @@ repository wd = do
   return . parseRepo $ raw
 
 constraints :: FilePath -> IO Pkg
-constraints wd = do
-  raw <- B.readFile $ wd </> "constraints.json"
+constraints c = do
+  raw <- B.readFile c -- $ wd </> "constraints.json"
   let Just target = decode raw :: Maybe [Text]
       (ds,cs) = partition (\c -> case T.uncons c of Just ('+', _) -> True; Just ('-', _) -> False) target
       deps = map (return . fromText . T.tail) ds
@@ -116,8 +116,8 @@ constraints wd = do
   return Pkg { pkgId = ("_VIRTUAL_",[]), size = 0, depends = deps, confls = conf }
 
 initial :: FilePath -> IO ([PkgId])
-initial wd = do
-  raw <- B.readFile $ wd </> "initial.json"
+initial i = do
+  raw <- B.readFile i -- $ wd </> "initial.json"
   let Just cs = decode raw
   return . map fromText $ cs
 
