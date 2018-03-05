@@ -1,16 +1,11 @@
-all: deps
+STACK := $(shell command -v stack 2> /dev/null)
 
-compile: deps
-	./compile.sh
-
-deps:
-	./install-z3.sh
-	touch deps
-
-test: compile
-	./run_tests.sh
-
-clean:
-	rm -rf .stack-work
-
-.PHONY: all compile test clean reallyclean
+all:
+ifndef STACK
+	@apt update
+	@apt install curl -y
+	@curl -sSL https://get.haskellstack.org/ | sh
+endif
+	@./install-z3.sh
+	@stack setup
+	@stack build
